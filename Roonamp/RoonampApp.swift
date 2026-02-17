@@ -7,11 +7,142 @@
 
 import SwiftUI
 
+#if os(macOS)
+class AppDelegate: NSObject, NSApplicationDelegate {
+    override init() {
+        super.init()
+        // Prevent macOS from restoring stale window state across launches.
+        // Without this, closing the main window saves "no window" state that
+        // persists and prevents the window from appearing on next launch.
+        UserDefaults.standard.set(true, forKey: "ApplePersistenceIgnoreState")
+    }
+
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        return false
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if !flag {
+            WinampWindow.current?.makeKeyAndOrderFront(nil)
+        }
+        return true
+    }
+}
+#endif
+
 @main
 struct RoonampApp: App {
+    #if os(macOS)
+    @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
+    #endif
+
+    @StateObject private var roonAPI = RoonAPI(
+        appInfo: RoonAppInfo(
+            extensionId: "com.yourcompany.roonamp",
+            displayName: "Roonamp",
+            displayVersion: "1.0.0",
+            publisher: "Your Name",
+            email: "your.email@example.com"
+        )
+    )
+    @StateObject private var skinManager = WinampSkinManager()
+
+    @State private var showAlbumArt = false
+    @AppStorage("windowScale") private var windowScale: Double = 2.0
+    @Environment(\.openWindow) private var openWindow
+
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            if let skin = skinManager.currentSkin {
+                WinampSkinView(skin: skin)
+                    .environmentObject(roonAPI)
+                    .environmentObject(skinManager)
+            } else {
+                ContentView(showAlbumArt: $showAlbumArt)
+                    .environmentObject(roonAPI)
+                    .environmentObject(skinManager)
+            }
         }
+        .windowStyle(.hiddenTitleBar)
+        .windowResizability(.contentSize)
+        .commands {
+            CommandGroup(after: .windowArrangement) {
+                Button("Show Main Window") {
+                    WinampWindow.current?.makeKeyAndOrderFront(nil)
+                }
+                .keyboardShortcut("1", modifiers: .command)
+
+                Button("Show Album Art") {
+                    openWindow(id: "album-art", value: true)
+                }
+                .keyboardShortcut("2", modifiers: .command)
+
+                Button("Show Playlist") {
+                    roonAPI.isPlaylistVisible = true
+                    // Pre-position hidden window at snap location before showing
+                    if WinampWindow.isSnapped,
+                       let playlist = WinampWindow.playlist,
+                       let mainWindow = WinampWindow.current {
+                        let mainFrame = mainWindow.frame
+                        let isBelow = WinampWindow.snapOffset.y < 0
+                        let plSize = playlist.frame.size
+                        let y: CGFloat = isBelow ? mainFrame.minY - plSize.height : mainFrame.maxY
+                        playlist.setFrameOrigin(NSPoint(x: mainFrame.minX, y: y))
+                    }
+                    openWindow(id: "playlist", value: true)
+                }
+                .keyboardShortcut("3", modifiers: .command)
+            }
+            CommandGroup(after: .toolbar) {
+                Toggle("Always on Top", isOn: $roonAPI.alwaysOnTop)
+                    .keyboardShortcut("t", modifiers: .command)
+
+                Button("Cycle Size (1x / 1.5x / 2x)") {
+                    switch windowScale {
+                    case 1.0: windowScale = 1.5
+                    case 1.5: windowScale = 2.0
+                    default: windowScale = 1.0
+                    }
+                }
+                .keyboardShortcut("d", modifiers: .command)
+            }
+        }
+
+        WindowGroup("Album Art", id: "album-art", for: Bool.self) { $isShowing in
+            AlbumArtView()
+                .environmentObject(roonAPI)
+                .onAppear {
+                    showAlbumArt = true
+                    roonAPI.isAlbumArtVisible = true
+                }
+                .onDisappear {
+                    showAlbumArt = false
+                    roonAPI.isAlbumArtVisible = false
+                }
+        }
+        .windowStyle(.hiddenTitleBar)
+        .windowResizability(.contentSize)
+        .defaultSize(width: 400, height: 400)
+
+        WindowGroup("Playlist", id: "playlist", for: Bool.self) { $isShowing in
+            if let skin = skinManager.currentSkin {
+                WinampPlaylistView(skin: skin)
+                    .environmentObject(roonAPI)
+                    .environmentObject(skinManager)
+                    .onDisappear {
+                        roonAPI.isPlaylistVisible = false
+                    }
+            }
+        }
+        .windowStyle(.hiddenTitleBar)
+        .windowResizability(.contentSize)
+
+        #if os(macOS)
+        Settings {
+            SettingsView()
+                .environmentObject(roonAPI)
+                .environmentObject(skinManager)
+        }
+        #endif
     }
 }
