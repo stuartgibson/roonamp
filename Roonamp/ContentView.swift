@@ -8,13 +8,8 @@
 import SwiftUI
 
 struct ContentView: View {
-    @StateObject private var discovery = RoonDiscovery()
     @EnvironmentObject var roonAPI: RoonAPI
-    @State private var selectedCore: RoonCore?
     @State private var isConnecting = false
-    @State private var showingManualConnection = false
-    @State private var manualHost = ""
-    @State private var manualPort = "9100"
     @Binding var showAlbumArt: Bool
     @Environment(\.openWindow) private var openWindow
     
@@ -266,7 +261,7 @@ struct ContentView: View {
     private func connectToRoon() {
         isConnecting = true
         
-        print("🔌 Starting Roon extension via Node.js bridge")
+        print("🔌 Starting Roon Core discovery")
         
         // Use the existing RoonAPI instance
         roonAPI.connect()

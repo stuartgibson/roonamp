@@ -8,7 +8,7 @@
 import Foundation
 import Combine
 
-/// Main class for communicating with Roon Core via HTTP bridge
+/// Main class for communicating with Roon Core via native SOOD/MOO protocols
 @MainActor
 class RoonAPI: ObservableObject {
     @Published var isConnected = false
@@ -50,11 +50,19 @@ class RoonAPI: ObservableObject {
             NotificationCenter.default.post(name: .alwaysOnTopChanged, object: alwaysOnTop)
         }
     }
-    
+
     private let appInfo: RoonAppInfo
-    private let bridgeURL = "http://localhost:3000"
-    private var statusTimer: Timer?
-    
+    private let sood = RoonSOOD()
+    private var moo: RoonMOO?
+    private var imageCache = RoonImageCache()
+    private var coreInfo: RoonCoreInfo?
+    private var reconnectTask: Task<Void, Never>?
+    private var zoneSubscriptionId: Int?
+    private var queueSubscriptionId: Int?
+    private var subscribedQueueZoneId: String?
+    private var pairingSubscribers: [Int: Int] = [:] // requestId -> subKey
+    private var pairedCoreId: String?
+
     init(appInfo: RoonAppInfo) {
         self.appInfo = appInfo
         // Restore preferences
@@ -62,225 +70,410 @@ class RoonAPI: ObservableObject {
         self.isPlaylistVisible = UserDefaults.standard.bool(forKey: "isPlaylistVisible")
         self.isAlbumArtVisible = UserDefaults.standard.bool(forKey: "isAlbumArtVisible")
     }
-    
+
     // MARK: - Connection Management
-    
+
+    private var isDiscovering = false
+
     func connect() {
-        print("🔌 Connecting to Roon bridge at \(bridgeURL)")
-        print("💡 Make sure the Node.js server is running:")
-        print("   cd /Users/stuart/Sites/Roonamp/roon-bridge-server && node server.js")
-        
-        startPolling()
+        guard !isConnected && !isDiscovering else { return }
+        isDiscovering = true
+        rlog("Starting native Roon Core discovery...")
+        errorMessage = "Searching for Roon Core on the network..."
+        startDiscovery()
     }
-    
+
     func disconnect() {
         print("🔌 Disconnecting")
-        stopPolling()
+        isDiscovering = false
+        sood.stopDiscovery()
+        reconnectTask?.cancel()
+        reconnectTask = nil
+        if let moo = moo {
+            Task {
+                await moo.disconnect()
+            }
+        }
+        moo = nil
         isConnected = false
     }
-    
-    private func startPolling() {
-        statusTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
+
+    private func startDiscovery() {
+        sood.startDiscovery { [weak self] core in
+            guard let self = self else { return }
             Task { @MainActor in
-                await self?.updateStatus()
+                self.isDiscovering = false
+                self.sood.stopDiscovery()
+                self.coreInfo = core
+                self.imageCache.coreIP = core.ip
+                self.imageCache.corePort = core.port
+                await self.connectWebSocket(ip: core.ip, port: core.port)
             }
         }
     }
-    
-    private func stopPolling() {
-        statusTimer?.invalidate()
-        statusTimer = nil
-    }
-    
-    private func updateStatus() async {
-        // Check connection status
-        do {
-            let url = URL(string: "\(bridgeURL)/status")!
-            let (data, response) = try await URLSession.shared.data(from: url)
-            
-            // Server is running if we get a response
-            errorMessage = nil
-            
-            if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-               let connected = json["connected"] as? Bool {
-                isConnected = connected
-                
-                if !connected {
-                    // Server is running but not paired with Roon Core
-                    print("⏳ Bridge server running, waiting for Roon Core to pair...")
-                    errorMessage = "Waiting for Roon Core connection. Please enable the extension in Roon Settings > Extensions."
+
+    private func connectWebSocket(ip: String, port: Int) async {
+        let newMoo = RoonMOO()
+        self.moo = newMoo
+
+        await newMoo.connect(
+            ip: ip, port: port,
+            onRequest: { [weak self] msg, moo in
+                guard let self = self else { return }
+                Task { @MainActor in
+                    await self.handleIncomingRequest(msg, moo: moo)
                 }
-                
-                if connected {
-                    await updateZones()
-                    if isPlaylistVisible {
-                        await fetchQueue()
-                    }
+            },
+            onDisconnect: { [weak self] in
+                guard let self = self else { return }
+                Task { @MainActor in
+                    self.handleDisconnect()
                 }
             }
-        } catch {
-            isConnected = false
-            print("❌ Bridge server not reachable: \(error.localizedDescription)")
-            if errorMessage == nil {
-                errorMessage = "Bridge not running. Start it with: cd /Users/stuart/Sites/Roonamp/roon-bridge-server && node server.js"
+        )
+
+        // Step 1: Request core info
+        await newMoo.sendRequest("com.roonlabs.registry:1/info") { [weak self] msg in
+            guard let self = self, let msg = msg, let body = msg.body else { return }
+            Task { @MainActor in
+                let coreId = body["core_id"] as? String ?? ""
+                let coreName = body["display_name"] as? String ?? "Roon Core"
+                rlog("Connected to \(coreName) (core_id: \(coreId))")
+                await self.registerExtension(coreId: coreId, moo: newMoo)
             }
         }
     }
-    
-    private func updateZones() async {
-        do {
-            let url = URL(string: "\(bridgeURL)/zones")!
-            let (data, _) = try await URLSession.shared.data(from: url)
-            
-            // Debug: Print raw response
-            if let rawString = String(data: data, encoding: .utf8) {
-                print("🔍 Raw zones response: \(rawString.prefix(500))...")
+
+    private func registerExtension(coreId: String, moo: RoonMOO) async {
+        // Look up saved token for this core
+        let tokenKey = "roon_token_\(coreId)"
+        let savedToken = UserDefaults.standard.string(forKey: tokenKey)
+
+        var regBody: [String: Any] = [
+            "extension_id": appInfo.extensionId,
+            "display_name": appInfo.displayName,
+            "display_version": appInfo.displayVersion,
+            "publisher": appInfo.publisher,
+            "email": appInfo.email,
+            "required_services": ["com.roonlabs.transport:2"],
+            "optional_services": [],
+            "provided_services": ["com.roonlabs.pairing:1", "com.roonlabs.ping:1"]
+        ]
+        if let token = savedToken {
+            regBody["token"] = token
+        }
+
+        errorMessage = "Waiting for Roon Core authorization..."
+        rlog("Registering extension with Roon Core...")
+
+        await moo.sendRequest("com.roonlabs.registry:1/register", body: regBody) { [weak self] msg in
+            guard let self = self, let msg = msg else { return }
+            guard msg.name == "Registered", let body = msg.body else {
+                print("⚠️ Registration response: \(msg.name)")
+                return
             }
-            
-            // Try to parse as generic JSON first to see the structure
-            if let json = try? JSONSerialization.jsonObject(with: data) {
-                print("🔍 JSON type: \(type(of: json))")
-                
-                // Check if it's a dictionary with a "zones" key containing the actual zones
-                if let wrapper = json as? [String: Any] {
-                    print("🔍 Top-level keys: \(wrapper.keys)")
-                    
-                    // First: Check if zones are an ARRAY under "zones" key
-                    if let zonesArray = wrapper["zones"] as? [[String: Any]] {
-                        print("🔍 Found zones array with \(zonesArray.count) zones")
-                        var newZones: [RoonZone] = []
-                        for zoneData in zonesArray {
-                            if let zone = parseZone(from: zoneData) {
-                                newZones.append(zone)
-                            }
-                        }
-                        updateZonesList(with: newZones)
-                        return
-                    }
-                    
-                    // Second: Check if zones are a DICTIONARY under "zones" key
-                    if let zonesDict = wrapper["zones"] as? [String: [String: Any]] {
-                        print("🔍 Found nested zones dictionary with \(zonesDict.count) zones")
-                        parseAndUpdateZones(from: zonesDict)
-                        return
-                    }
-                    
-                    // Third: Maybe the wrapper itself is the zones dict (no "zones" key)
-                    let firstKey = wrapper.keys.first ?? ""
-                    if firstKey != "zones" && firstKey != "error" {
-                        if let zonesDict = json as? [String: [String: Any]] {
-                            print("🔍 Parsed top-level as zones dictionary with \(zonesDict.count) zones")
-                            parseAndUpdateZones(from: zonesDict)
-                            return
-                        }
-                    }
+
+            let newCoreId = body["core_id"] as? String ?? coreId
+            let token = body["token"] as? String
+
+            Task { @MainActor in
+                // Save token for future reconnections
+                if let token = token {
+                    let key = "roon_token_\(newCoreId)"
+                    UserDefaults.standard.set(token, forKey: key)
+                    print("💾 Saved auth token for core \(newCoreId)")
                 }
-                
-                // Maybe it's an array at the top level?
-                if let zonesArray = json as? [[String: Any]] {
-                    print("🔍 Parsed as top-level zones array with \(zonesArray.count) zones")
-                    var newZones: [RoonZone] = []
-                    for zoneData in zonesArray {
-                        if let zone = parseZone(from: zoneData) {
-                            newZones.append(zone)
-                        }
-                    }
-                    updateZonesList(with: newZones)
-                    return
-                }
-                
-                print("⚠️ Unknown JSON structure")
-            } else {
-                print("⚠️ Failed to parse as JSON at all")
+
+                self.pairedCoreId = newCoreId
+                self.isConnected = true
+                self.errorMessage = nil
+                rlog("Registered with Roon Core!")
+
+                // Subscribe to zones
+                await self.subscribeZones(moo: moo)
             }
-        } catch {
-            print("⚠️ Failed to get zones: \(error)")
         }
     }
-    
-    private func parseAndUpdateZones(from zonesDict: [String: [String: Any]]) {
-        var newZones: [RoonZone] = []
-        
-        for (zoneId, zoneData) in zonesDict {
-            print("🔍 Processing zone: \(zoneId)")
-            if let zone = parseZone(from: zoneData) {
-                newZones.append(zone)
+
+    // MARK: - Incoming Request Handling
+
+    private func handleIncomingRequest(_ msg: MOOMessage, moo: RoonMOO) async {
+        // The name for incoming REQUESTs is "service/method"
+        let parts = msg.name.split(separator: "/", maxSplits: 1)
+        let service = parts.count > 0 ? String(parts[0]) : ""
+        let method = parts.count > 1 ? String(parts[1]) : ""
+
+        if service == "com.roonlabs.ping:1" && method == "ping" {
+            await moo.sendComplete(requestId: msg.requestId, name: "Success")
+        } else if service == "com.roonlabs.pairing:1" {
+            await handlePairingRequest(method: method, msg: msg, moo: moo)
+        } else {
+            print("⚠️ Unknown incoming request: \(msg.name)")
+            await moo.sendComplete(requestId: msg.requestId, name: "NotImplemented")
+        }
+    }
+
+    private func handlePairingRequest(method: String, msg: MOOMessage, moo: RoonMOO) async {
+        if method == "subscribe_pairing" {
+            let subKey = msg.body?["subscription_key"] as? Int ?? 0
+            pairingSubscribers[msg.requestId] = subKey
+            await moo.sendContinue(requestId: msg.requestId, name: "Subscribed",
+                                   body: ["paired_core_id": pairedCoreId as Any])
+        } else if method == "unsubscribe_pairing" {
+            pairingSubscribers.removeValue(forKey: msg.requestId)
+            await moo.sendComplete(requestId: msg.requestId, name: "Unsubscribed")
+        } else {
+            await moo.sendComplete(requestId: msg.requestId, name: "NotImplemented")
+        }
+    }
+
+    // MARK: - Zone Subscription
+
+    private func subscribeZones(moo: RoonMOO) async {
+        let subKey = await moo.nextSubKey()
+        let body: [String: Any] = ["subscription_key": subKey]
+
+        zoneSubscriptionId = await moo.sendRequest(
+            "com.roonlabs.transport:2/subscribe_zones",
+            body: body
+        ) { [weak self] msg in
+            guard let self = self, let msg = msg, let body = msg.body else { return }
+            Task { @MainActor in
+                self.handleZoneEvent(response: msg.name, data: body)
+                // After initial zone subscription, subscribe to queue if playlist is visible
+                if msg.name == "Subscribed" && self.isPlaylistVisible {
+                    await self.subscribeQueue()
+                }
             }
         }
-        
-        updateZonesList(with: newZones)
     }
-    
+
+    private func handleZoneEvent(response: String, data: [String: Any]) {
+        if response == "Subscribed" {
+            // Full zone list
+            if let zonesArray = data["zones"] as? [[String: Any]] {
+                var newZones: [RoonZone] = []
+                for zoneData in zonesArray {
+                    if let zone = parseZone(from: zoneData) {
+                        newZones.append(zone)
+                    }
+                }
+                rlog("Zones: \(newZones.map { $0.displayName })")
+                updateZonesList(with: newZones)
+            }
+        } else if response == "Changed" {
+            handleZoneChanged(data)
+        }
+    }
+
+    private func handleZoneChanged(_ data: [String: Any]) {
+        // Handle removed zones
+        if let removed = data["zones_removed"] as? [String] {
+            zones.removeAll { removed.contains($0.id) }
+        }
+
+        // Handle added zones
+        if let added = data["zones_added"] as? [[String: Any]] {
+            for zoneData in added {
+                if let zone = parseZone(from: zoneData) {
+                    zones.append(zone)
+                }
+            }
+        }
+
+        // Handle changed zones
+        if let changed = data["zones_changed"] as? [[String: Any]] {
+            for zoneData in changed {
+                if let zone = parseZone(from: zoneData) {
+                    if let idx = zones.firstIndex(where: { $0.id == zone.id }) {
+                        zones[idx] = zone
+                    } else {
+                        zones.append(zone)
+                    }
+                }
+            }
+        }
+
+        // Handle seek changes (high frequency, only updates seek position)
+        if let seekChanged = data["zones_seek_changed"] as? [[String: Any]] {
+            for seekData in seekChanged {
+                guard let zoneId = seekData["zone_id"] as? String,
+                      let seekPos = seekData["seek_position"] as? Int else { continue }
+                if let idx = zones.firstIndex(where: { $0.id == zoneId }),
+                   let nowPlaying = zones[idx].nowPlaying {
+                    let updatedNP = NowPlaying(
+                        queueItemId: nowPlaying.queueItemId,
+                        title: nowPlaying.title,
+                        artist: nowPlaying.artist,
+                        album: nowPlaying.album,
+                        imageKey: nowPlaying.imageKey,
+                        imageUrl: nowPlaying.imageUrl,
+                        length: nowPlaying.length,
+                        seekPosition: seekPos,
+                        sampleRate: nowPlaying.sampleRate,
+                        bitsPerSample: nowPlaying.bitsPerSample,
+                        channels: nowPlaying.channels
+                    )
+                    zones[idx] = RoonZone(
+                        id: zones[idx].id,
+                        displayName: zones[idx].displayName,
+                        state: zones[idx].state,
+                        nowPlaying: updatedNP,
+                        settings: zones[idx].settings,
+                        volume: zones[idx].volume
+                    )
+                }
+            }
+        }
+
+        // Update currentZone if it was affected
+        if let selectedId = currentZone?.id,
+           let updated = zones.first(where: { $0.id == selectedId }) {
+            let oldTitle = currentZone?.nowPlaying?.title
+            currentZone = updated
+
+            // When now_playing track changes, re-subscribe queue to get fresh data
+            if let newTitle = updated.nowPlaying?.title,
+               newTitle != oldTitle,
+               isPlaylistVisible {
+                Task { await self.resubscribeQueue() }
+            }
+        }
+    }
+
+    // MARK: - Queue Subscription
+
+    func subscribeQueue() async {
+        guard let zoneId = currentZone?.id, let moo = moo else { return }
+
+        // Unsubscribe from previous queue subscription
+        if subscribedQueueZoneId != nil, let subId = queueSubscriptionId {
+            await moo.sendRequest(
+                "com.roonlabs.transport:2/unsubscribe_queue",
+                body: ["subscription_key": subId]
+            ) { _ in }
+            queueSubscriptionId = nil
+        }
+
+        subscribedQueueZoneId = zoneId
+        let subKey = await moo.nextSubKey()
+        let body: [String: Any] = [
+            "subscription_key": subKey,
+            "zone_or_output_id": zoneId,
+            "max_item_count": 100
+        ]
+
+        queueSubscriptionId = await moo.sendRequest(
+            "com.roonlabs.transport:2/subscribe_queue",
+            body: body
+        ) { [weak self] msg in
+            guard let self = self, let msg = msg, let body = msg.body else { return }
+            Task { @MainActor in
+                self.handleQueueEvent(response: msg.name, data: body)
+            }
+        }
+    }
+
+    /// Force a fresh queue subscription to get current queue state.
+    private func resubscribeQueue() async {
+        // Force re-subscribe by clearing the tracked zone so subscribeQueue doesn't skip
+        subscribedQueueZoneId = nil
+        await subscribeQueue()
+    }
+
+    private func handleQueueEvent(response: String, data: [String: Any]) {
+        guard Date() > suppressQueueUpdatesUntil else { return }
+
+        if let items = data["items"] as? [[String: Any]] {
+            let newItems = items.compactMap { item -> QueueItem? in
+                guard let queueItemId = item["queue_item_id"] as? Int else { return nil }
+                let threeLine = item["three_line"] as? [String: Any]
+                let title = threeLine?["line1"] as? String ?? "Unknown"
+                let artist = threeLine?["line2"] as? String ?? ""
+                let album = threeLine?["line3"] as? String ?? ""
+                let length = item["length"] as? Int
+                let imageKey = item["image_key"] as? String
+                return QueueItem(id: queueItemId, title: title, artist: artist, album: album, length: length, imageKey: imageKey)
+            }
+
+            // Update history: move played items from old queue into history
+            if preserveHistoryOnNextQueueChange {
+                preserveHistoryOnNextQueueChange = false
+            } else if !queueItems.isEmpty && !newItems.isEmpty {
+                let newFirstId = newItems.first!.id
+                let allItems = queueHistory + queueItems
+                if let idx = allItems.firstIndex(where: { $0.id == newFirstId }) {
+                    queueHistory = Array(allItems.prefix(idx))
+                } else {
+                    // Completely new queue (e.g. different album)
+                    queueHistory.removeAll()
+                }
+            }
+            queueItems = newItems
+            saveQueueState()
+        }
+    }
+
+    // MARK: - Reconnection
+
+    private func handleDisconnect() {
+        print("⚠️ Disconnected from Roon Core")
+        isConnected = false
+        moo = nil
+        zoneSubscriptionId = nil
+        queueSubscriptionId = nil
+        subscribedQueueZoneId = nil
+        pairingSubscribers.removeAll()
+        errorMessage = "Lost connection to Roon Core. Reconnecting..."
+
+        // Start reconnection after a short delay
+        reconnectTask?.cancel()
+        reconnectTask = Task {
+            try? await Task.sleep(nanoseconds: 3_000_000_000) // 3 seconds
+            guard !Task.isCancelled else { return }
+            startDiscovery()
+        }
+    }
+
+    // MARK: - Zone Parsing
+
     private func updateZonesList(with newZones: [RoonZone]) {
-        print("🔍 Total zones parsed: \(newZones.count)")
-        
-        // Store the currently selected zone ID before updating
         let selectedZoneId = currentZone?.id
-        
-        // Update the zones list
         zones = newZones
-        
-        // Try to restore the zone in this order:
-        // 1. Currently selected zone (if switching zones manually)
-        // 2. Last saved zone from UserDefaults (on app launch)
-        // 3. First available zone (fallback)
-        
+
         if let selectedZoneId = selectedZoneId {
-            // User has manually selected a zone - keep it
-            print("🔍 Looking for currently selected zone: \(selectedZoneId)")
             if let updatedZone = zones.first(where: { $0.id == selectedZoneId }) {
                 currentZone = updatedZone
-                print("✅ Found and updated current zone: \(updatedZone.displayName) - nowPlaying: \(updatedZone.nowPlaying?.title ?? "none")")
             } else {
-                print("⚠️ Selected zone \(selectedZoneId) not found in updated zones")
-                // Selected zone no longer exists, try to restore from UserDefaults
                 restoreLastZone()
             }
         } else {
-            // No zone currently selected, try to restore from UserDefaults
             restoreLastZone()
         }
     }
-    
+
     private func restoreLastZone() {
-        // Try to restore the last saved zone
         if let lastZoneId = UserDefaults.standard.string(forKey: "lastSelectedZoneId") {
-            print("💾 Attempting to restore last zone: \(lastZoneId)")
             if let restoredZone = zones.first(where: { $0.id == lastZoneId }) {
                 currentZone = restoredZone
-                print("✅ Restored last zone: \(restoredZone.displayName)")
                 return
-            } else {
-                print("⚠️ Last zone \(lastZoneId) not found, using first available zone")
             }
         }
-        
-        // Fallback to first zone
         currentZone = zones.first
-        if let zone = currentZone {
-            print("🔍 Set default zone: \(zone.displayName)")
-        }
     }
-    
+
     private func parseZone(from data: [String: Any]) -> RoonZone? {
         guard let zoneId = data["zone_id"] as? String,
               let displayName = data["display_name"] as? String else {
-            print("⚠️ Missing zone_id or display_name")
             return nil
         }
-        
-        print("📋 Parsing zone: \(displayName) (ID: \(zoneId))")
-        
-        // State can be at the top level or inside now_playing
+
         var state: RoonZone.PlaybackState = .stopped
-        
+
         var nowPlaying: NowPlaying?
         if let nowPlayingData = data["now_playing"] as? [String: Any] {
-            print("  📀 Now playing data found")
-            
-            // Check for state in now_playing first (more accurate)
+            // Check for state in now_playing first
             if let stateStr = nowPlayingData["state"] as? String {
-                print("  State (from now_playing): \(stateStr)")
                 switch stateStr {
                 case "playing": state = .playing
                 case "paused": state = .paused
@@ -288,26 +481,15 @@ class RoonAPI: ObservableObject {
                 default: state = .stopped
                 }
             }
-            
+
             if let threeLine = nowPlayingData["three_line"] as? [String: Any] {
                 let title = threeLine["line1"] as? String ?? "Unknown"
                 let artist = threeLine["line2"] as? String ?? ""
                 let album = threeLine["line3"] as? String ?? ""
-                
-                print("    Title: \(title)")
-                print("    Artist: \(artist)")
-                print("    Album: \(album)")
-                
-                // Get the image_key and construct the proper URL via the bridge
-                var imageUrl: String?
+
                 let rawImageKey = nowPlayingData["image_key"] as? String
-                if let imageKey = rawImageKey {
-                    print("    Image key: \(imageKey)")
-                    imageUrl = "\(bridgeURL)/image/\(imageKey)"
-                    print("    Image URL: \(imageUrl ?? "nil")")
-                }
-                
-                // Extract format info if available
+                let imageUrl = rawImageKey.flatMap { imageCache.imageURL(for: $0) }
+
                 var sampleRate: Int?
                 var bitsPerSample: Int?
                 var channels: Int?
@@ -317,8 +499,10 @@ class RoonAPI: ObservableObject {
                     channels = format["channels"] as? Int
                 }
 
+                let queueItemId: Int? = nil  // not provided in zone subscription data
+
                 nowPlaying = NowPlaying(
-                    queueItemId: nowPlayingData["queue_item_id"] as? Int,
+                    queueItemId: queueItemId,
                     title: title,
                     artist: artist,
                     album: album,
@@ -330,17 +514,11 @@ class RoonAPI: ObservableObject {
                     bitsPerSample: bitsPerSample,
                     channels: channels
                 )
-            } else {
-                print("  ⚠️ No three_line found in now_playing")
-                print("  Keys available: \(nowPlayingData.keys)")
             }
-        } else {
-            print("  ⚠️ No now_playing data for this zone")
         }
-        
-        // Fall back to top-level state if not found in now_playing
+
+        // Fall back to top-level state
         if state == .stopped, let stateStr = data["state"] as? String {
-            print("  State (from top level): \(stateStr)")
             switch stateStr {
             case "playing": state = .playing
             case "paused": state = .paused
@@ -348,8 +526,8 @@ class RoonAPI: ObservableObject {
             default: state = .stopped
             }
         }
-        
-        // Parse zone settings (shuffle, loop, auto_radio)
+
+        // Parse zone settings
         var zoneSettings: ZoneSettings?
         if let settingsData = data["settings"] as? [String: Any] {
             let loopStr = settingsData["loop"] as? String ?? "disabled"
@@ -378,116 +556,115 @@ class RoonAPI: ObservableObject {
             volumeInfo = VolumeInfo(outputId: outputId, type: type, min: min, max: max, value: value, step: step)
         }
 
-        let zone = RoonZone(id: zoneId, displayName: displayName, state: state, nowPlaying: nowPlaying, settings: zoneSettings, volume: volumeInfo)
-        print("  ✅ Created zone: \(displayName) - State: \(state) - nowPlaying: \(nowPlaying != nil ? "YES" : "NO")")
-        return zone
+        return RoonZone(id: zoneId, displayName: displayName, state: state, nowPlaying: nowPlaying, settings: zoneSettings, volume: volumeInfo)
     }
-    
+
     // MARK: - Transport Control
-    
+
     func play(zoneId: String) async {
         optimisticallyUpdateState(zoneId: zoneId, newState: .playing)
-        await control(zoneId: zoneId, command: "play")
+        await sendControl(zoneId: zoneId, control: "play")
     }
-    
+
     func pause(zoneId: String) async {
         optimisticallyUpdateState(zoneId: zoneId, newState: .paused)
-        await control(zoneId: zoneId, command: "pause")
+        await sendControl(zoneId: zoneId, control: "pause")
     }
-    
+
     func playPause(zoneId: String) async {
-        // Toggle the state optimistically
         if let currentState = currentZone?.state {
             let newState: RoonZone.PlaybackState = currentState == .playing ? .paused : .playing
             optimisticallyUpdateState(zoneId: zoneId, newState: newState)
         }
-        await control(zoneId: zoneId, command: "playpause")
+        await sendControl(zoneId: zoneId, control: "playpause")
     }
-    
+
     func stop(zoneId: String) async {
         optimisticallyUpdateState(zoneId: zoneId, newState: .stopped)
-        await control(zoneId: zoneId, command: "stop")
+        await sendControl(zoneId: zoneId, control: "stop")
     }
-    
+
     func next(zoneId: String) async {
-        // Keep the current playback state when skipping tracks
-        // (don't show loading state since it's confusing for users)
-        await control(zoneId: zoneId, command: "next")
+        await sendControl(zoneId: zoneId, control: "next")
     }
-    
+
     func previous(zoneId: String) async {
-        // Keep the current playback state when skipping tracks
-        // (don't show loading state since it's confusing for users)
-        await control(zoneId: zoneId, command: "previous")
+        await sendControl(zoneId: zoneId, control: "previous")
     }
-    
+
     func seek(zoneId: String, seconds: Int) async {
-        await control(zoneId: zoneId, command: "seek/\(seconds)")
+        guard let moo = moo else { return }
+        let body: [String: Any] = [
+            "zone_or_output_id": zoneId,
+            "how": "absolute",
+            "seconds": seconds
+        ]
+        await moo.sendRequest("com.roonlabs.transport:2/seek", body: body) { msg in
+            if let msg = msg, msg.name != "Success" {
+                print("⚠️ Seek response: \(msg.name)")
+            }
+        }
     }
 
     func toggleShuffle(zoneId: String) async {
-        print("🔀 toggleShuffle called for zone: \(zoneId), settings: \(String(describing: currentZone?.settings))")
         if var settings = currentZone?.settings {
             settings.shuffle.toggle()
             optimisticallyUpdateState(zoneId: zoneId, newSettings: settings)
             await changeSettings(zoneId: zoneId, settings: ["shuffle": settings.shuffle])
-        } else {
-            print("⚠️ No settings available for shuffle toggle")
         }
     }
 
     func cycleLoop(zoneId: String) async {
-        print("🔁 cycleLoop called for zone: \(zoneId), settings: \(String(describing: currentZone?.settings))")
         if var settings = currentZone?.settings {
             settings.loop = settings.loop.next
             optimisticallyUpdateState(zoneId: zoneId, newSettings: settings)
             await changeSettings(zoneId: zoneId, settings: ["loop": settings.loop.rawValue])
-        } else {
-            print("⚠️ No settings available for loop cycle")
         }
     }
 
     func changeVolume(zoneId: String, value: Double) async {
-        guard let vol = currentZone?.volume else { return }
+        guard let vol = currentZone?.volume, let moo = moo else { return }
         let clamped = min(vol.max, max(vol.min, value))
         let updatedVol = VolumeInfo(outputId: vol.outputId, type: vol.type, min: vol.min, max: vol.max, value: clamped, step: vol.step)
         optimisticallyUpdateState(zoneId: zoneId, newVolume: updatedVol)
-        do {
-            guard let encodedOutputId = vol.outputId.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) else { return }
-            let urlString = "\(bridgeURL)/volume/\(encodedOutputId)"
-            guard let url = URL(string: urlString) else { return }
-            var request = URLRequest(url: url)
-            request.httpMethod = "POST"
-            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            let body: [String: Any] = ["how": "absolute", "value": Int(clamped)]
-            request.httpBody = try JSONSerialization.data(withJSONObject: body)
-            let (_, _) = try await URLSession.shared.data(for: request)
-            print("✅ Volume changed to \(Int(clamped)) on output \(vol.outputId)")
-        } catch {
-            print("❌ Failed to change volume: \(error)")
+
+        let body: [String: Any] = [
+            "output_id": vol.outputId,
+            "how": "absolute",
+            "value": Int(clamped)
+        ]
+        await moo.sendRequest("com.roonlabs.transport:2/change_volume", body: body) { msg in
+            if let msg = msg, msg.name != "Success" {
+                print("⚠️ Volume response: \(msg.name)")
+            }
         }
     }
 
     private func changeSettings(zoneId: String, settings: [String: Any]) async {
-        do {
-            guard let encodedZoneId = zoneId.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) else { return }
-            let urlString = "\(bridgeURL)/settings/\(encodedZoneId)"
-            guard let url = URL(string: urlString) else { return }
-
-            var request = URLRequest(url: url)
-            request.httpMethod = "POST"
-            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            request.httpBody = try JSONSerialization.data(withJSONObject: settings)
-
-            let (_, _) = try await URLSession.shared.data(for: request)
-            print("✅ Sent settings change to zone \(zoneId): \(settings)")
-        } catch {
-            print("❌ Failed to change settings: \(error)")
+        guard let moo = moo else { return }
+        var body = settings
+        body["zone_or_output_id"] = zoneId
+        await moo.sendRequest("com.roonlabs.transport:2/change_settings", body: body) { msg in
+            if let msg = msg, msg.name != "Success" {
+                print("⚠️ Settings response: \(msg.name)")
+            }
         }
     }
-    
+
+    private func sendControl(zoneId: String, control: String) async {
+        guard let moo = moo else { return }
+        let body: [String: Any] = [
+            "zone_or_output_id": zoneId,
+            "control": control
+        ]
+        await moo.sendRequest("com.roonlabs.transport:2/control", body: body) { msg in
+            if let msg = msg, msg.name != "Success" {
+                print("⚠️ Control \(control) response: \(msg.name)")
+            }
+        }
+    }
+
     private func optimisticallyUpdateState(zoneId: String, newState: RoonZone.PlaybackState? = nil, newSettings: ZoneSettings? = nil, newVolume: VolumeInfo? = nil) {
-        // Find the zone and update its state immediately for responsive UI
         if let zoneIndex = zones.firstIndex(where: { $0.id == zoneId }) {
             let zone = zones[zoneIndex]
             let updatedZone = RoonZone(
@@ -500,67 +677,19 @@ class RoonAPI: ObservableObject {
             )
             zones[zoneIndex] = updatedZone
 
-            // Update currentZone if this is the selected zone
             if currentZone?.id == zoneId {
                 currentZone = updatedZone
-                if let newState = newState {
-                    print("🎯 Optimistically updated state to: \(newState)")
-                }
-                if newSettings != nil {
-                    print("🎯 Optimistically updated settings")
-                }
             }
         }
     }
-    
+
+    // MARK: - Queue
+
     func fetchQueue() async {
-        guard let zoneId = currentZone?.id else { return }
-        guard Date() > suppressQueueUpdatesUntil else { return }
-        do {
-            guard let encodedZoneId = zoneId.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) else { return }
-            let url = URL(string: "\(bridgeURL)/queue/\(encodedZoneId)")!
-            let (data, _) = try await URLSession.shared.data(from: url)
-            if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-               let items = json["items"] as? [[String: Any]] {
-                let newItems = items.compactMap { item -> QueueItem? in
-                    guard let queueItemId = item["queue_item_id"] as? Int else { return nil }
-                    let threeLine = item["three_line"] as? [String: Any]
-                    let title = threeLine?["line1"] as? String ?? "Unknown"
-                    let artist = threeLine?["line2"] as? String ?? ""
-                    let album = threeLine?["line3"] as? String ?? ""
-                    let length = item["length"] as? Int
-                    let imageKey = item["image_key"] as? String
-                    return QueueItem(id: queueItemId, title: title, artist: artist, album: album, length: length, imageKey: imageKey)
-                }
-
-                // Detect queue changes
-                if preserveHistoryOnNextQueueChange {
-                    // playFromHere already updated history — just accept the new queue
-                    preserveHistoryOnNextQueueChange = false
-                } else if !queueItems.isEmpty && !newItems.isEmpty {
-                    let newFirstId = newItems.first!.id
-                    let oldIds = queueItems.map { $0.id }
-                    if let idx = oldIds.firstIndex(of: newFirstId) {
-                        if idx > 0 {
-                            // Tracks before idx have been played — add to history
-                            let played = Array(queueItems.prefix(idx))
-                            queueHistory.append(contentsOf: played)
-                        }
-                    } else {
-                        // New first item wasn't in old queue — entirely new queue, clear history
-                        queueHistory.removeAll()
-                    }
-                }
-
-                queueItems = newItems
-                saveQueueState()
-            }
-        } catch {
-            print("⚠️ Failed to fetch queue: \(error)")
-        }
+        // For native API, subscribe to queue updates instead of polling
+        await subscribeQueue()
     }
 
-    /// Clear play history (e.g. when switching zones)
     func clearQueueHistory() {
         queueHistory = []
     }
@@ -592,13 +721,10 @@ class RoonAPI: ObservableObject {
         }
     }
 
-    /// Set before playFromHere to preserve history through the queue change
     private var preserveHistoryOnNextQueueChange = false
-    /// Suppress queue updates until this time (prevents visual jumping during queue rebuild)
     private var suppressQueueUpdatesUntil: Date = .distantPast
 
     func playFromHere(zoneId: String, queueItemId: Int) async {
-        // Build the new history and optimistic queue from our combined list
         let allItems = queueHistory + queueItems
         if let targetIndex = allItems.firstIndex(where: { $0.id == queueItemId }) {
             queueHistory = Array(allItems.prefix(targetIndex))
@@ -607,31 +733,15 @@ class RoonAPI: ObservableObject {
         preserveHistoryOnNextQueueChange = true
         suppressQueueUpdatesUntil = Date().addingTimeInterval(3)
 
-        do {
-            guard let encodedZoneId = zoneId.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) else { return }
-            let urlString = "\(bridgeURL)/play_from_here/\(encodedZoneId)/\(queueItemId)"
-            guard let url = URL(string: urlString) else { return }
-            var request = URLRequest(url: url)
-            request.httpMethod = "POST"
-            let (_, _) = try await URLSession.shared.data(for: request)
-            print("✅ Playing from queue item \(queueItemId)")
-        } catch {
-            print("❌ Failed to play from here: \(error)")
-        }
-    }
-
-    private func control(zoneId: String, command: String) async {
-        do {
-            let urlString = "\(bridgeURL)/control/\(zoneId)/\(command)"
-            guard let url = URL(string: urlString) else { return }
-            
-            var request = URLRequest(url: url)
-            request.httpMethod = "POST"
-            
-            let (_, _) = try await URLSession.shared.data(for: request)
-            print("✅ Sent \(command) to zone \(zoneId)")
-        } catch {
-            print("❌ Failed to send control: \(error)")
+        guard let moo = moo else { return }
+        let body: [String: Any] = [
+            "zone_or_output_id": zoneId,
+            "queue_item_id": queueItemId
+        ]
+        await moo.sendRequest("com.roonlabs.transport:2/play_from_here", body: body) { msg in
+            if let msg = msg, msg.name != "Success" {
+                print("⚠️ Play from here response: \(msg.name)")
+            }
         }
     }
 }
@@ -706,8 +816,6 @@ struct RoonZone: Identifiable, Hashable {
         case loading
     }
 
-    // Hash and equality based only on ID so that zones with updated
-    // nowPlaying data are still considered "the same zone"
     func hash(into hasher: inout Hasher) {
         hasher.combine(id)
     }
@@ -718,17 +826,17 @@ struct RoonZone: Identifiable, Hashable {
 }
 
 struct NowPlaying: Hashable {
-    let queueItemId: Int? // queue_item_id from Roon
+    let queueItemId: Int?
     let title: String
     let artist: String
     let album: String
-    let imageKey: String? // raw image_key from Roon
+    let imageKey: String?
     let imageUrl: String?
-    let length: Int? // seconds
-    let seekPosition: Int? // seconds
-    let sampleRate: Int? // Hz (e.g., 44100)
-    let bitsPerSample: Int? // (e.g., 16, 24)
-    let channels: Int? // (e.g., 2)
+    let length: Int?
+    let seekPosition: Int?
+    let sampleRate: Int?
+    let bitsPerSample: Int?
+    let channels: Int?
 
     var kbpsDisplay: Int {
         guard let sr = sampleRate, let bps = bitsPerSample, let ch = channels else { return 0 }
@@ -740,503 +848,8 @@ struct NowPlaying: Hashable {
         return sr / 1000
     }
 }
-// MARK: - Roon Extension Server
-
-import Network
-
-/// Runs a TCP server that Roon Core can connect to
-@MainActor
-class RoonExtensionServer: ObservableObject {
-    @Published var isRunning = false
-    @Published var isConnected = false
-    @Published var errorMessage: String?
-    
-    private var listener: NWListener?
-    private var connection: NWConnection?
-    private let appInfo: RoonAppInfo
-    private let port: UInt16 = 9876
-    
-    init(appInfo: RoonAppInfo) {
-        self.appInfo = appInfo
-    }
-    
-    func start() {
-        print("🚀 Starting Roon extension server on port \(port)")
-        
-        let parameters = NWParameters.tcp
-        parameters.allowLocalEndpointReuse = true
-        
-        do {
-            listener = try NWListener(using: parameters, on: NWEndpoint.Port(integerLiteral: port))
-            
-            listener?.stateUpdateHandler = { [weak self] state in
-                Task { @MainActor in
-                    self?.handleListenerState(state)
-                }
-            }
-            
-            listener?.newConnectionHandler = { [weak self] connection in
-                Task { @MainActor in
-                    print("📡 Roon Core is connecting!")
-                    self?.handleIncomingConnection(connection)
-                }
-            }
-            
-            listener?.start(queue: .main)
-            
-        } catch {
-            print("❌ Failed to start server: \(error)")
-            errorMessage = "Failed to start server: \(error.localizedDescription)"
-        }
-    }
-    
-    func stop() {
-        listener?.cancel()
-        connection?.cancel()
-        isRunning = false
-        isConnected = false
-    }
-    
-    private func handleListenerState(_ state: NWListener.State) {
-        print("🎧 Server state: \(state)")
-        
-        switch state {
-        case .ready:
-            print("✅ Extension server is ready on port \(port)")
-            isRunning = true
-            broadcastPresence()
-            
-        case .failed(let error):
-            print("❌ Server failed: \(error)")
-            errorMessage = "Server failed: \(error.localizedDescription)"
-            isRunning = false
-            
-        default:
-            break
-        }
-    }
-    
-    private func handleIncomingConnection(_ newConnection: NWConnection) {
-        print("📡 Accepting connection from Roon Core")
-        self.connection = newConnection
-        
-        newConnection.stateUpdateHandler = { [weak self] state in
-            Task { @MainActor in
-                self?.handleConnectionState(state)
-            }
-        }
-        
-        newConnection.start(queue: .main)
-        startReceiving()
-    }
-    
-    private func handleConnectionState(_ state: NWConnection.State) {
-        print("🔗 Connection state: \(state)")
-        
-        switch state {
-        case .ready:
-            print("✅ Connected to Roon Core!")
-            isConnected = true
-            
-        case .failed(let error):
-            print("❌ Connection failed: \(error)")
-            errorMessage = "Connection failed: \(error.localizedDescription)"
-            isConnected = false
-            
-        default:
-            break
-        }
-    }
-    
-    private func startReceiving() {
-        connection?.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] data, _, isComplete, error in
-            guard let self = self else { return }
-            
-            if let data = data, !data.isEmpty {
-                Task { @MainActor in
-                    await self.handleReceivedData(data)
-                }
-            }
-            
-            if !isComplete {
-                self.startReceiving()
-            }
-        }
-    }
-    
-    private func handleReceivedData(_ data: Data) async {
-        if let message = String(data: data, encoding: .utf8) {
-            print("📨 Received from Roon: \(message)")
-        }
-    }
-    
-    private func broadcastPresence() {
-        print("📢 Broadcasting extension presence via SOOD")
-        
-        // Proper SOOD format: SOOD ROON/<version> <host>:<port> <service_id> [<display_name>]
-        // Based on node-roon-api implementation
-        let ipAddress = getLocalIPAddress() ?? "localhost"
-        let serviceId = appInfo.extensionId
-        let displayName = appInfo.displayName
-        
-        let message = "SOOD ROON/1.0 \(ipAddress):\(port) \(serviceId) \(displayName)\n"
-        guard let data = message.data(using: .utf8) else { return }
-        
-        print("📤 SOOD message: \(message.trimmingCharacters(in: .whitespacesAndNewlines))")
-        
-        // Send to broadcast address
-        let connection = NWConnection(host: .ipv4(.broadcast), port: 9003, using: .udp)
-        connection.start(queue: .main)
-        
-        connection.send(content: data, completion: .contentProcessed { [weak self] error in
-            if let error = error {
-                print("❌ Broadcast failed: \(error)")
-            } else {
-                print("✅ Broadcast sent successfully")
-                // Keep broadcasting periodically
-                DispatchQueue.main.asyncAfter(deadline: .now() + 5) {
-                    self?.broadcastPresence()
-                }
-            }
-            connection.cancel()
-        })
-    }
-    
-    private func getLocalIPAddress() -> String? {
-        var address: String?
-        var ifaddr: UnsafeMutablePointer<ifaddrs>?
-        
-        if getifaddrs(&ifaddr) == 0 {
-            var ptr = ifaddr
-            while ptr != nil {
-                defer { ptr = ptr?.pointee.ifa_next }
-                
-                let interface = ptr?.pointee
-                let addrFamily = interface?.ifa_addr.pointee.sa_family
-                
-                if addrFamily == UInt8(AF_INET) {
-                    let name = String(cString: (interface?.ifa_name)!)
-                    if name == "en0" || name == "en1" || name == "en7" {
-                        var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
-                        getnameinfo(interface?.ifa_addr, socklen_t((interface?.ifa_addr.pointee.sa_len)!),
-                                    &hostname, socklen_t(hostname.count),
-                                    nil, socklen_t(0), NI_NUMERICHOST)
-                        address = String(cString: hostname)
-                    }
-                }
-            }
-            freeifaddrs(ifaddr)
-        }
-        
-        return address
-    }
-}
-
-// MARK: - Node.js Bridge
-/// Bridges to a Node.js process running the node-roon-api
-@MainActor
-class RoonNodeBridge: ObservableObject {
-    @Published var isConnected = false
-    @Published var errorMessage: String?
-    
-    private var nodeProcess: Process?
-    private var serverPort: Int = 3000
-    
-    func start() {
-        print("🟢 Starting Node.js bridge server...")
-        
-        // Create the bridge server script
-        createBridgeScript()
-        
-        // Start Node.js process
-        startNodeProcess()
-    }
-    
-    func stop() {
-        nodeProcess?.terminate()
-        nodeProcess = nil
-        isConnected = false
-    }
-    
-    private func createBridgeScript() {
-        let scriptPath = getScriptPath()
-        
-        let script = """
-        const RoonApi = require('node-roon-api');
-        const RoonApiTransport = require('node-roon-api-transport');
-        const RoonApiImage = require('node-roon-api-image');
-        const http = require('http');
-        
-        let core;
-        let transport;
-        let image;
-        
-        const roon = new RoonApi({
-            extension_id: 'com.yourcompany.roonamp',
-            display_name: 'Roonamp',
-            display_version: '1.0.0',
-            publisher: 'Your Name',
-            email: 'your.email@example.com',
-            core_paired: (pairedCore) => {
-                console.log('PAIRED:', pairedCore.display_name);
-                core = pairedCore;
-                transport = core.services.RoonApiTransport;
-                image = core.services.RoonApiImage;
-            },
-            core_unpaired: () => {
-                console.log('UNPAIRED');
-                core = null;
-                transport = null;
-                image = null;
-            }
-        });
-        
-        roon.init_services({
-            required_services: [RoonApiTransport, RoonApiImage]
-        });
-        
-        roon.start_discovery();
-        
-        const server = http.createServer((req, res) => {
-            res.setHeader('Access-Control-Allow-Origin', '*');
-            
-            const url = new URL(req.url, `http://localhost:\(serverPort)`);
-            
-            if (url.pathname === '/status') {
-                res.setHeader('Content-Type', 'application/json');
-                res.end(JSON.stringify({ 
-                    connected: !!core,
-                    core_name: core?.display_name 
-                }));
-            } else if (url.pathname === '/zones') {
-                res.setHeader('Content-Type', 'application/json');
-                if (!transport) {
-                    res.statusCode = 503;
-                    res.end(JSON.stringify({ error: 'Not connected' }));
-                    return;
-                }
-                transport.get_zones((err, zones) => {
-                    if (err) {
-                        res.statusCode = 500;
-                        res.end(JSON.stringify({ error: err.message }));
-                    } else {
-                        res.end(JSON.stringify(zones || {}));
-                    }
-                });
-            } else if (url.pathname.startsWith('/image/')) {
-                // Handle image requests
-                const imageKey = decodeURIComponent(url.pathname.substring(7));
-                
-                if (!image) {
-                    res.statusCode = 503;
-                    res.setHeader('Content-Type', 'application/json');
-                    res.end(JSON.stringify({ error: 'Not connected' }));
-                    return;
-                }
-                
-                const options = {
-                    scale: 'fit',
-                    width: 600,
-                    height: 600,
-                    format: 'image/jpeg'
-                };
-                
-                image.get_image(imageKey, options, (err, contentType, imageData) => {
-                    if (err) {
-                        res.statusCode = 404;
-                        res.setHeader('Content-Type', 'application/json');
-                        res.end(JSON.stringify({ error: 'Image not found' }));
-                    } else {
-                        res.setHeader('Content-Type', contentType);
-                        res.setHeader('Cache-Control', 'public, max-age=86400');
-                        res.end(imageData);
-                    }
-                });
-            } else if (url.pathname === '/control') {
-                res.setHeader('Content-Type', 'application/json');
-                if (!transport) {
-                    res.statusCode = 503;
-                    res.end(JSON.stringify({ error: 'Not connected' }));
-                    return;
-                }
-                
-                let body = '';
-                req.on('data', chunk => { body += chunk; });
-                req.on('end', () => {
-                    try {
-                        const { zone_id, control } = JSON.parse(body);
-                        transport.control(zone_id, control, (err) => {
-                            if (err) {
-                                res.statusCode = 500;
-                                res.end(JSON.stringify({ error: err.message }));
-                            } else {
-                                res.end(JSON.stringify({ success: true }));
-                            }
-                        });
-                    } catch (e) {
-                        res.statusCode = 400;
-                        res.end(JSON.stringify({ error: 'Invalid JSON' }));
-                    }
-                });
-            } else {
-                res.statusCode = 404;
-                res.setHeader('Content-Type', 'application/json');
-                res.end(JSON.stringify({ error: 'Not found' }));
-            }
-        });
-        
-        server.listen(\(serverPort), () => {
-            console.log('Bridge server listening on port \(serverPort)');
-        });
-        """
-        
-        try? script.write(toFile: scriptPath, atomically: true, encoding: .utf8)
-        print("📝 Created bridge script at: \(scriptPath)")
-    }
-    
-    private func startNodeProcess() {
-        let nodePath = getNodePath()
-        let scriptPath = getScriptPath()
-        
-        // Verify Node.js exists
-        guard FileManager.default.fileExists(atPath: nodePath) else {
-            let errorMsg = "Node.js not found at \(nodePath). Please install Node.js from https://nodejs.org or via Homebrew: brew install node"
-            print("❌ \(errorMsg)")
-            errorMessage = errorMsg
-            return
-        }
-        
-        // Verify script directory exists
-        let scriptDir = "/Users/stuart/Sites/Roonamp/node_modules_bridge"
-        guard FileManager.default.fileExists(atPath: scriptDir) else {
-            let errorMsg = "node_modules_bridge directory not found. Please run: cd /Users/stuart/Sites/Roonamp && mkdir -p node_modules_bridge && cd node_modules_bridge && npm init -y && npm install node-roon-api node-roon-api-transport node-roon-api-image"
-            print("❌ \(errorMsg)")
-            errorMessage = errorMsg
-            return
-        }
-        
-        print("✅ Using Node.js at: \(nodePath)")
-        print("✅ Script path: \(scriptPath)")
-        
-        nodeProcess = Process()
-        // Use the node path directly with arguments
-        nodeProcess?.launchPath = nodePath
-        nodeProcess?.arguments = [scriptPath]
-        nodeProcess?.currentDirectoryPath = scriptDir
-        
-        // Set up environment to include NVM path
-        var environment = ProcessInfo.processInfo.environment
-        if let nvmBinPath = nodePath.components(separatedBy: "/node").first {
-            let pathValue = "\(nvmBinPath):" + (environment["PATH"] ?? "")
-            environment["PATH"] = pathValue
-        }
-        nodeProcess?.environment = environment
-        
-        let pipe = Pipe()
-        nodeProcess?.standardOutput = pipe
-        nodeProcess?.standardError = pipe
-        
-        pipe.fileHandleForReading.readabilityHandler = { handle in
-            if let output = String(data: handle.availableData, encoding: .utf8) {
-                print("🟢 Node.js: \(output)", terminator: "")
-                
-                Task { @MainActor in
-                    if output.contains("PAIRED:") {
-                        self.isConnected = true
-                    } else if output.contains("UNPAIRED") {
-                        self.isConnected = false
-                    } else if output.contains("Cannot find module") {
-                        self.errorMessage = "Node modules not installed. Please run: cd /Users/stuart/Sites/Roonamp/node_modules_bridge && npm install RoonLabs/node-roon-api RoonLabs/node-roon-api-transport RoonLabs/node-roon-api-image"
-                    } else if output.contains("Error") || output.contains("error") {
-                        self.errorMessage = "Node.js error: \(output)"
-                    }
-                }
-            }
-        }
-        
-        // Use launch() instead of run() for deprecated API
-        nodeProcess?.launch()
-        print("✅ Node.js process launched")
-    }
-    
-    private func getScriptPath() -> String {
-        let projectPath = "/Users/stuart/Sites/Roonamp/node_modules_bridge"
-        return projectPath + "/roon-bridge.js"
-    }
-    
-    private func getNodePath() -> String {
-        // Hardcoded path for your NVM installation (most reliable for sandboxed apps)
-        let hardcodedPath = "/Users/stuart/.nvm/versions/node/v24.8.0/bin/node"
-        if FileManager.default.fileExists(atPath: hardcodedPath) {
-            print("✅ Found Node.js at hardcoded path: \(hardcodedPath)")
-            return hardcodedPath
-        }
-        
-        // Try to find any NVM installation
-        let nvmDir = "/Users/stuart/.nvm/versions/node"
-        if let nvmContents = try? FileManager.default.contentsOfDirectory(atPath: nvmDir) {
-            for version in nvmContents.sorted().reversed() { // Use latest version
-                let nodePath = "\(nvmDir)/\(version)/bin/node"
-                if FileManager.default.fileExists(atPath: nodePath) {
-                    print("✅ Found Node.js in NVM: \(nodePath)")
-                    return nodePath
-                }
-            }
-        }
-        
-        // Fallback: Try common locations
-        let paths = [
-            "/usr/local/bin/node",
-            "/opt/homebrew/bin/node",
-            "/usr/bin/node",
-            "/opt/local/bin/node"
-        ]
-        
-        for path in paths {
-            if FileManager.default.fileExists(atPath: path) {
-                print("✅ Found Node.js at: \(path)")
-                return path
-            }
-        }
-        
-        print("⚠️ Node.js not found, returning default path")
-        return "/usr/local/bin/node"
-    }
-    
-    // MARK: - API Methods
-    
-    func getStatus() async throws -> [String: Any] {
-        let url = URL(string: "http://localhost:\(serverPort)/status")!
-        let (data, _) = try await URLSession.shared.data(from: url)
-        return try JSONSerialization.jsonObject(with: data) as? [String: Any] ?? [:]
-    }
-    
-    func getZones() async throws -> [[String: Any]] {
-        let url = URL(string: "http://localhost:\(serverPort)/zones")!
-        let (data, _) = try await URLSession.shared.data(from: url)
-        
-        if let dict = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-           let zones = dict["zones"] as? [[String: Any]] {
-            return zones
-        }
-        return []
-    }
-    
-    func control(zoneId: String, command: String) async throws {
-        let url = URL(string: "http://localhost:\(serverPort)/control")!
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        
-        let body = ["zone_id": zoneId, "control": command]
-        request.httpBody = try JSONSerialization.data(withJSONObject: body)
-        
-        let (_, _) = try await URLSession.shared.data(for: request)
-    }
-}
 
 // MARK: - Notification Names
 extension Notification.Name {
     static let alwaysOnTopChanged = Notification.Name("alwaysOnTopChanged")
 }
-

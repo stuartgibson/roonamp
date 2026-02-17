@@ -123,9 +123,11 @@ struct WinampPlaylistView: View {
                     .resizable()
                     .interpolation(.none)
                     .frame(width: playlistSize.width * scale, height: CGFloat(WinampSkin.playlistTitleBarHeight) * scale)
-                    .onTapGesture(count: 2) {
-                        isPlaylistShade = true
-                    }
+                    .overlay(
+                        DoubleClickOverlay {
+                            isPlaylistShade = true
+                        }
+                    )
 
                 // Shade button (left of close)
                 Button {
@@ -831,6 +833,39 @@ struct WinampPlaylistView: View {
     }
 }
 
+// MARK: - Double-Click Overlay
+
+/// NSView overlay that captures double-clicks at the AppKit level,
+/// preventing isMovableByWindowBackground from consuming them for system zoom/minimize.
+struct DoubleClickOverlay: NSViewRepresentable {
+    let onDoubleClick: () -> Void
+
+    func makeNSView(context: Context) -> DoubleClickNSView {
+        let view = DoubleClickNSView()
+        view.onDoubleClick = onDoubleClick
+        return view
+    }
+
+    func updateNSView(_ nsView: DoubleClickNSView, context: Context) {
+        nsView.onDoubleClick = onDoubleClick
+    }
+}
+
+class DoubleClickNSView: NSView {
+    var onDoubleClick: (() -> Void)?
+
+    override func mouseDown(with event: NSEvent) {
+        if event.clickCount == 2 {
+            onDoubleClick?()
+        } else {
+            super.mouseDown(with: event)
+        }
+    }
+
+    // Allow window dragging on single click by forwarding to window
+    override var mouseDownCanMoveWindow: Bool { true }
+}
+
 // MARK: - AppKit Scrollbar View
 
 /// NSView-based scrollbar that captures mouse events before isMovableByWindowBackground
@@ -1259,7 +1294,7 @@ struct PlaylistWindowAccessor: NSViewRepresentable {
     }
 
     private func configureWindow(_ window: NSWindow) {
-        window.styleMask = [.borderless, .resizable, .miniaturizable]
+        window.styleMask = [.borderless, .resizable]
         window.isMovableByWindowBackground = true
         window.isOpaque = false
         window.backgroundColor = NSColor(white: 0, alpha: 0.005)
@@ -1394,6 +1429,10 @@ struct PlaylistWindowAccessor: NSViewRepresentable {
 
         init(parent: PlaylistWindowAccessor) {
             self.parent = parent
+        }
+
+        func windowShouldZoom(_ window: NSWindow, toFrame newFrame: NSRect) -> Bool {
+            false  // Prevent system double-click zoom so SwiftUI gesture fires
         }
 
         func windowWillMove(_ notification: Notification) {
