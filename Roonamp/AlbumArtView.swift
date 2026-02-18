@@ -9,6 +9,7 @@ import SwiftUI
 
 struct AlbumArtView: View {
     @EnvironmentObject var roonAPI: RoonAPI
+    @EnvironmentObject var playback: PlaybackState
     @State private var isHovering = false
     @AppStorage("albumArtShowTrackInfo") private var showTrackInfo = true
     @State private var refreshID = UUID()
@@ -21,8 +22,7 @@ struct AlbumArtView: View {
                 .ignoresSafeArea()
             
             // Album Art Content
-            if let zone = roonAPI.currentZone,
-               let nowPlaying = zone.nowPlaying,
+            if let nowPlaying = playback.nowPlaying,
                let imageUrl = nowPlaying.imageUrl,
                let url = URL(string: imageUrl) {
                 AsyncImage(url: url) { phase in
@@ -66,8 +66,7 @@ struct AlbumArtView: View {
             }
             
             // Track Info Overlay (bottom)
-            if let zone = roonAPI.currentZone,
-               let nowPlaying = zone.nowPlaying {
+            if let nowPlaying = playback.nowPlaying {
                 VStack {
                     Spacer()
                     VStack(alignment: .leading, spacing: 2) {
@@ -99,8 +98,8 @@ struct AlbumArtView: View {
             // Transport Controls Overlay (center)
             HStack(spacing: 20) {
                 Button {
-                    if let zone = roonAPI.currentZone {
-                        Task { await roonAPI.previous(zoneId: zone.id) }
+                    if let zoneId = playback.zoneId {
+                        Task { await roonAPI.previous(zoneId: zoneId) }
                     }
                 } label: {
                     Image(systemName: "backward.fill")
@@ -109,18 +108,18 @@ struct AlbumArtView: View {
                 .buttonStyle(.plain)
 
                 Button {
-                    if let zone = roonAPI.currentZone {
-                        Task { await roonAPI.playPause(zoneId: zone.id) }
+                    if let zoneId = playback.zoneId {
+                        Task { await roonAPI.playPause(zoneId: zoneId) }
                     }
                 } label: {
-                    Image(systemName: roonAPI.currentZone?.state == .playing ? "pause.fill" : "play.fill")
+                    Image(systemName: playback.state == .playing ? "pause.fill" : "play.fill")
                         .font(.system(size: 32))
                 }
                 .buttonStyle(.plain)
 
                 Button {
-                    if let zone = roonAPI.currentZone {
-                        Task { await roonAPI.next(zoneId: zone.id) }
+                    if let zoneId = playback.zoneId {
+                        Task { await roonAPI.next(zoneId: zoneId) }
                     }
                 } label: {
                     Image(systemName: "forward.fill")
@@ -306,15 +305,17 @@ struct AlbumArtWindowAccessor: NSViewRepresentable {
 #endif
 
 #Preview {
+    let api = RoonAPI(
+        appInfo: RoonAppInfo(
+            extensionId: "com.yourcompany.roonamp",
+            displayName: "Roonamp",
+            displayVersion: "1.0.0",
+            publisher: "Your Name",
+            email: "your.email@example.com"
+        )
+    )
     AlbumArtView()
-        .environmentObject(RoonAPI(
-            appInfo: RoonAppInfo(
-                extensionId: "com.yourcompany.roonamp",
-                displayName: "Roonamp",
-                displayVersion: "1.0.0",
-                publisher: "Your Name",
-                email: "your.email@example.com"
-            )
-        ))
+        .environmentObject(api)
+        .environmentObject(api.playback)
         .frame(width: 400, height: 400)
 }

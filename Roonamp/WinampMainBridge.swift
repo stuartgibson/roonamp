@@ -12,6 +12,7 @@ import Combine
 struct WinampMainBridge: View {
     let skin: WinampSkin
     @EnvironmentObject var roonAPI: RoonAPI
+    @EnvironmentObject var playback: PlaybackState
     @EnvironmentObject var skinManager: WinampSkinManager
     @Environment(\.openSettings) private var openSettings
     @Environment(\.openWindow) private var openWindow
@@ -102,11 +103,11 @@ struct WinampMainBridge: View {
             if !roonAPI.isConnected {
                 roonAPI.connect()
             }
-            if let pos = roonAPI.currentZone?.nowPlaying?.seekPosition {
-                currentSeekPosition = pos
+            if playback.seekPosition > 0 {
+                currentSeekPosition = playback.seekPosition
                 lastUpdateTime = Date()
             }
-            if roonAPI.currentZone?.state == .playing {
+            if playback.state == .playing {
                 startPositionTimer()
             }
             if roonAPI.isPlaylistVisible {
@@ -123,21 +124,20 @@ struct WinampMainBridge: View {
         .onDisappear {
             stopPositionTimer()
         }
-        .onChange(of: roonAPI.currentZone?.nowPlaying?.seekPosition) { oldValue, newValue in
-            if let newPosition = newValue {
-                if let localSeek = localSeekPosition {
-                    if abs(newPosition - localSeek) <= 3 {
-                        localSeekPosition = nil
-                        currentSeekPosition = newPosition
-                        lastUpdateTime = Date()
-                    }
-                } else {
+        .onChange(of: playback.seekPosition) { oldValue, newValue in
+            let newPosition = newValue
+            if let localSeek = localSeekPosition {
+                if abs(newPosition - localSeek) <= 3 {
+                    localSeekPosition = nil
                     currentSeekPosition = newPosition
                     lastUpdateTime = Date()
                 }
+            } else {
+                currentSeekPosition = newPosition
+                lastUpdateTime = Date()
             }
         }
-        .onChange(of: roonAPI.currentZone?.state) { oldValue, newValue in
+        .onChange(of: playback.state) { oldValue, newValue in
             if newValue == .playing {
                 lastUpdateTime = Date()
                 startPositionTimer()
@@ -152,11 +152,12 @@ struct WinampMainBridge: View {
         guard isWindowShade else { return }
         stopPositionTimer()
         positionTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { _ in
-            if roonAPI.currentZone?.state == .playing {
+            if playback.state == .playing {
                 let elapsed = Date().timeIntervalSince(lastUpdateTime)
                 if let localBase = localSeekPosition {
                     currentSeekPosition = localBase + Int(elapsed)
-                } else if let basePosition = roonAPI.currentZone?.nowPlaying?.seekPosition {
+                } else {
+                    let basePosition = playback.seekPosition
                     currentSeekPosition = basePosition + Int(elapsed)
                 }
             }

@@ -1022,6 +1022,7 @@ struct WinampWindowShadeView: View {
     let onClose: () -> Void
     let onSeek: (Double) -> Void
     @EnvironmentObject var roonAPI: RoonAPI
+    @EnvironmentObject var playback: PlaybackState
     @Environment(\.winampScale) private var scale
 
     enum WSDisplayMode: String, CaseIterable {
@@ -1050,9 +1051,9 @@ struct WinampWindowShadeView: View {
 
             // Playback time in the second dark rectangle, right-aligned
             if let textBitmap = skin.textBitmap {
-                let seekPos = roonAPI.currentZone?.state == .playing
+                let seekPos = playback.state == .playing
                     ? currentSeekPosition
-                    : (roonAPI.currentZone?.nowPlaying?.seekPosition ?? 0)
+                    : playback.seekPosition
                 let timeText = formatCompactTime(seekPos)
                 let charWidth = 5
                 let textWidth = timeText.count * charWidth
@@ -1117,7 +1118,7 @@ struct WinampWindowShadeView: View {
                 let visMode: VisualizerMode = displayMode == .spectrum ? .spectrum : .oscilloscope
                 WinampVisualizer(
                     colors: skin.visColors,
-                    isPlaying: roonAPI.currentZone?.state == .playing,
+                    isPlaying: playback.state == .playing,
                     region: region,
                     scale: scale,
                     mode: .constant(visMode),
@@ -1128,7 +1129,7 @@ struct WinampWindowShadeView: View {
                 )
                 .allowsHitTesting(false)
             case .trackInfo:
-                if let zone = roonAPI.currentZone, let nowPlaying = zone.nowPlaying,
+                if let nowPlaying = playback.nowPlaying,
                    let textBitmap = skin.textBitmap {
                     WinampBitmapText(
                         text: "\(nowPlaying.artist) - \(nowPlaying.title)",
@@ -1162,7 +1163,7 @@ struct WinampWindowShadeView: View {
         let timeToShow: Int
         let isNegative: Bool
         if showRemaining,
-           let length = roonAPI.currentZone?.nowPlaying?.length {
+           let length = playback.nowPlaying?.length {
             timeToShow = max(0, length - seconds)
             isNegative = true
         } else {
@@ -1224,9 +1225,8 @@ struct WinampWindowShadeView: View {
     @ViewBuilder
     private func windowShadePositionBar(titleBarBitmap: NSImage) -> some View {
         let region = WinampSkin.wsPositionBarRegion
-        let zone = roonAPI.currentZone
-        let length = zone?.nowPlaying?.length ?? 0
-        let seekPos = zone?.state == .playing ? currentSeekPosition : (zone?.nowPlaying?.seekPosition ?? 0)
+        let length = playback.nowPlaying?.length ?? 0
+        let seekPos = playback.state == .playing ? currentSeekPosition : playback.seekPosition
         let progress = length > 0 ? min(1.0, max(0.0, Double(seekPos) / Double(length))) : 0.0
 
         WinampWindowShadePositionBar(
@@ -1314,16 +1314,18 @@ private struct WinampWindowShadePositionBar: View {
 #Preview {
     if let skinURL = Bundle.main.url(forResource: "base-2.91", withExtension: "wsz"),
        let skin = WinampSkinParser.parse(url: skinURL) {
+        let api = RoonAPI(
+            appInfo: RoonAppInfo(
+                extensionId: "com.yourcompany.roonamp",
+                displayName: "Roonamp",
+                displayVersion: "1.0.0",
+                publisher: "Your Name",
+                email: "your.email@example.com"
+            )
+        )
         WinampMainBridge(skin: skin)
-            .environmentObject(RoonAPI(
-                appInfo: RoonAppInfo(
-                    extensionId: "com.yourcompany.roonamp",
-                    displayName: "Roonamp",
-                    displayVersion: "1.0.0",
-                    publisher: "Your Name",
-                    email: "your.email@example.com"
-                )
-            ))
+            .environmentObject(api)
+            .environmentObject(api.playback)
             .environmentObject(WinampSkinManager())
     } else {
         Text("Failed to load skin")

@@ -14,6 +14,7 @@ import Combine
 struct WinampPlaylistView: View {
     let skin: WinampSkin
     @EnvironmentObject var roonAPI: RoonAPI
+    @EnvironmentObject var playback: PlaybackState
     @AppStorage("windowScale") private var windowScale: Double = 2.0
     private var scale: CGFloat { CGFloat(windowScale) }
 
@@ -665,7 +666,7 @@ struct WinampPlaylistView: View {
             let textSkinId = "\(Unmanaged.passUnretained(textBitmap).toOpaque())"
             let w = playlistSize.width
             let h = playlistSize.height
-            let seekPos = roonAPI.currentZone?.nowPlaying?.seekPosition ?? 0
+            let seekPos = playback.seekPosition
             let timeText = formatCompactTime(seekPos)
             let charWidth: CGFloat = 5
             let textWidth = CGFloat(timeText.count) * charWidth
@@ -692,7 +693,7 @@ struct WinampPlaylistView: View {
         let timeToShow: Int
         let prefix: String
         if showRemaining,
-           let length = roonAPI.currentZone?.nowPlaying?.length {
+           let length = playback.nowPlaying?.length {
             timeToShow = max(0, length - seconds)
             prefix = "-"
         } else {

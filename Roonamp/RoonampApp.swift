@@ -79,10 +79,12 @@ struct RoonampApp: App {
                 if let skin = skinManager.currentSkin {
                     WinampMainBridge(skin: skin)
                         .environmentObject(roonAPI)
+                        .environmentObject(roonAPI.playback)
                         .environmentObject(skinManager)
                 } else {
                     ContentView(showAlbumArt: $showAlbumArt)
                         .environmentObject(roonAPI)
+                        .environmentObject(roonAPI.playback)
                         .environmentObject(skinManager)
                 }
             }
@@ -138,6 +140,7 @@ struct RoonampApp: App {
         WindowGroup("Album Art", id: "album-art", for: Bool.self) { $isShowing in
             AlbumArtView()
                 .environmentObject(roonAPI)
+                .environmentObject(roonAPI.playback)
                 .onAppear {
                     showAlbumArt = true
                     roonAPI.isAlbumArtVisible = true
@@ -155,6 +158,7 @@ struct RoonampApp: App {
             if let skin = skinManager.currentSkin {
                 WinampPlaylistView(skin: skin)
                     .environmentObject(roonAPI)
+                    .environmentObject(roonAPI.playback)
                     .environmentObject(skinManager)
                     .onDisappear {
                         roonAPI.isPlaylistVisible = false

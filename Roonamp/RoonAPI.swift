@@ -31,6 +31,7 @@ class RoonAPI: ObservableObject {
             }
         }
     }
+    let playback = PlaybackState()
     @Published var errorMessage: String?
     @Published var queueItems: [QueueItem] = []
     @Published var queueHistory: [QueueItem] = []
@@ -69,6 +70,14 @@ class RoonAPI: ObservableObject {
         self.alwaysOnTop = UserDefaults.standard.bool(forKey: "alwaysOnTop")
         self.isPlaylistVisible = UserDefaults.standard.bool(forKey: "isPlaylistVisible")
         self.isAlbumArtVisible = UserDefaults.standard.bool(forKey: "isAlbumArtVisible")
+    }
+
+    private func syncPlayback() {
+        playback.state = currentZone?.state
+        playback.nowPlaying = currentZone?.nowPlaying
+        playback.seekPosition = currentZone?.nowPlaying?.seekPosition ?? 0
+        playback.zoneId = currentZone?.id
+        playback.displayName = currentZone?.displayName
     }
 
     // MARK: - Connection Management
@@ -295,7 +304,9 @@ class RoonAPI: ObservableObject {
         }
 
         // Handle seek changes (high frequency, only updates seek position)
+        var seekOnly = false
         if let seekChanged = data["zones_seek_changed"] as? [[String: Any]] {
+            seekOnly = (data["zones_changed"] == nil && data["zones"] == nil && data["zones_removed"] == nil)
             for seekData in seekChanged {
                 guard let zoneId = seekData["zone_id"] as? String,
                       let seekPos = seekData["seek_position"] as? Int else { continue }
@@ -323,14 +334,20 @@ class RoonAPI: ObservableObject {
                         volume: zones[idx].volume
                     )
                 }
+                // Update playback seek position for current zone
+                if zoneId == currentZone?.id {
+                    playback.seekPosition = seekPos
+                }
             }
         }
 
-        // Update currentZone if it was affected
-        if let selectedId = currentZone?.id,
+        // Update currentZone if it was affected (skip for seek-only events)
+        if !seekOnly,
+           let selectedId = currentZone?.id,
            let updated = zones.first(where: { $0.id == selectedId }) {
             let oldTitle = currentZone?.nowPlaying?.title
             currentZone = updated
+            syncPlayback()
 
             // When now_playing track changes, re-subscribe queue to get fresh data
             if let newTitle = updated.nowPlaying?.title,
@@ -444,6 +461,7 @@ class RoonAPI: ObservableObject {
         if let selectedZoneId = selectedZoneId {
             if let updatedZone = zones.first(where: { $0.id == selectedZoneId }) {
                 currentZone = updatedZone
+                syncPlayback()
             } else {
                 restoreLastZone()
             }
@@ -456,10 +474,12 @@ class RoonAPI: ObservableObject {
         if let lastZoneId = UserDefaults.standard.string(forKey: "lastSelectedZoneId") {
             if let restoredZone = zones.first(where: { $0.id == lastZoneId }) {
                 currentZone = restoredZone
+                syncPlayback()
                 return
             }
         }
         currentZone = zones.first
+        syncPlayback()
     }
 
     private func parseZone(from data: [String: Any]) -> RoonZone? {
@@ -679,6 +699,7 @@ class RoonAPI: ObservableObject {
 
             if currentZone?.id == zoneId {
                 currentZone = updatedZone
+                syncPlayback()
             }
         }
     }

@@ -9,6 +9,7 @@ import SwiftUI
 
 struct ContentView: View {
     @EnvironmentObject var roonAPI: RoonAPI
+    @EnvironmentObject var playback: PlaybackState
     @State private var isConnecting = false
     @Binding var showAlbumArt: Bool
     @Environment(\.openWindow) private var openWindow
@@ -114,19 +115,18 @@ struct ContentView: View {
     private var connectedView: some View {
         VStack(spacing: 15) {
             // Track Info
-            if let zone = roonAPI.currentZone,
-               let nowPlaying = zone.nowPlaying {
+            if let nowPlaying = playback.nowPlaying {
                 VStack(spacing: 3) {
                     Text(nowPlaying.title)
                         .font(.title3)
                         .fontWeight(.semibold)
                         .lineLimit(1)
-                    
+
                     Text(nowPlaying.artist)
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
-                    
+
                     Text(nowPlaying.album)
                         .font(.caption)
                         .foregroundStyle(.tertiary)
@@ -139,8 +139,8 @@ struct ContentView: View {
                 VStack(spacing: 3) {
                     Text("No music playing")
                         .foregroundStyle(.secondary)
-                    
-                    if let zoneName = roonAPI.currentZone?.displayName {
+
+                    if let zoneName = playback.displayName {
                         Text(zoneName)
                             .font(.caption)
                             .foregroundStyle(.tertiary)
@@ -153,7 +153,7 @@ struct ContentView: View {
                 // Transport Controls
                 HStack(spacing: 30) {
                     Button {
-                        guard let zoneId = roonAPI.currentZone?.id else { return }
+                        guard let zoneId = playback.zoneId else { return }
                         Task {
                             await roonAPI.previous(zoneId: zoneId)
                         }
@@ -161,25 +161,25 @@ struct ContentView: View {
                         Image(systemName: "backward.fill")
                             .font(.title2)
                     }
-                    .disabled(roonAPI.currentZone == nil)
-                    
+                    .disabled(playback.zoneId == nil)
+
                     Button {
-                        guard let zoneId = roonAPI.currentZone?.id else { return }
+                        guard let zoneId = playback.zoneId else { return }
                         Task {
                             await roonAPI.playPause(zoneId: zoneId)
                         }
                     } label: {
-                        let isPlaying = roonAPI.currentZone?.state == .playing
+                        let isPlaying = playback.state == .playing
                         Image(systemName: isPlaying ? "pause.circle.fill" : "play.circle.fill")
                             .font(.system(size: 60))
                             .contentTransition(.symbolEffect(.replace))
                     }
-                    .disabled(roonAPI.currentZone == nil)
+                    .disabled(playback.zoneId == nil)
                     .buttonStyle(.plain)
-                    .animation(.spring(response: 0.3, dampingFraction: 0.6), value: roonAPI.currentZone?.state)
-                    
+                    .animation(.spring(response: 0.3, dampingFraction: 0.6), value: playback.state)
+
                     Button {
-                        guard let zoneId = roonAPI.currentZone?.id else { return }
+                        guard let zoneId = playback.zoneId else { return }
                         Task {
                             await roonAPI.next(zoneId: zoneId)
                         }
@@ -187,14 +187,13 @@ struct ContentView: View {
                         Image(systemName: "forward.fill")
                             .font(.title2)
                     }
-                    .disabled(roonAPI.currentZone == nil)
+                    .disabled(playback.zoneId == nil)
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(.tint)
                 
                 // Small Album Art (clickable)
-                if let zone = roonAPI.currentZone,
-                   let nowPlaying = zone.nowPlaying {
+                if let nowPlaying = playback.nowPlaying {
                     Button {
                         if showAlbumArt {
                             // Close the window
@@ -277,16 +276,18 @@ struct ContentView: View {
 }
 
 #Preview {
+    let api = RoonAPI(
+        appInfo: RoonAppInfo(
+            extensionId: "com.yourcompany.roonamp",
+            displayName: "Roonamp",
+            displayVersion: "1.0.0",
+            publisher: "Your Name",
+            email: "your.email@example.com"
+        )
+    )
     ContentView(showAlbumArt: .constant(false))
-        .environmentObject(RoonAPI(
-            appInfo: RoonAppInfo(
-                extensionId: "com.yourcompany.roonamp",
-                displayName: "Roonamp",
-                displayVersion: "1.0.0",
-                publisher: "Your Name",
-                email: "your.email@example.com"
-            )
-        ))
+        .environmentObject(api)
+        .environmentObject(api.playback)
 }
 
 #if os(macOS)
