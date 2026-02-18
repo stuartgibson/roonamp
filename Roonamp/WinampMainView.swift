@@ -93,9 +93,20 @@ struct SpriteCache {
         let monosterCG = skin.monosterBitmap?.cgImage(forProposedRect: nil, context: nil, hints: nil)
         let shufrepCG = skin.shuffleRepeatBitmap?.cgImage(forProposedRect: nil, context: nil, hints: nil)
 
+        // Copy sprite into an independent buffer so the source bitmap's
+        // backing store can be freed after SpriteCache is built.
         func crop(_ img: CGImage?, _ r: CGRect) -> CGImage? {
-            guard let img = img else { return nil }
-            return img.cropping(to: r)
+            guard let img = img, let cropped = img.cropping(to: r) else { return nil }
+            let w = cropped.width
+            let h = cropped.height
+            guard w > 0, h > 0,
+                  let ctx = CGContext(data: nil, width: w, height: h,
+                                      bitsPerComponent: 8, bytesPerRow: w * 4,
+                                      space: CGColorSpaceCreateDeviceRGB(),
+                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+            else { return nil }
+            ctx.draw(cropped, in: CGRect(x: 0, y: 0, width: w, height: h))
+            return ctx.makeImage()
         }
 
         // Titlebar backgrounds
@@ -229,8 +240,11 @@ struct SpriteCache {
         plStates.append(crop(shufrepCG, CGRect(x: 23, y: 61, width: 23, height: 12)))  // off
         plStates.append(crop(shufrepCG, CGRect(x: 23, y: 73, width: 23, height: 12)))  // on
 
+        // Copy mainBg into independent buffer too
+        let mainBg = mainCG.flatMap { m in crop(m, CGRect(x: 0, y: 0, width: m.width, height: m.height)) }
+
         return SpriteCache(
-            mainBg: mainCG,
+            mainBg: mainBg,
             titlebarActive: titlebarActive,
             titlebarInactive: titlebarInactive,
             titleBtnOptions: titleBtnOptions,

@@ -200,6 +200,7 @@ struct WinampMainNSViewRepresentable: NSViewRepresentable {
         view.displayKbps = displayKbps
         view.displayKHz = displayKHz
         view.sprites = SpriteCache.build(from: skin)
+        DispatchQueue.main.async { skinManager.clearSourceBitmaps() }
 
         // Wire up callbacks
         wireCallbacks(view, context: context)
@@ -244,6 +245,7 @@ struct WinampMainNSViewRepresentable: NSViewRepresentable {
         if context.coordinator.currentSkinName != skin.name {
             context.coordinator.currentSkinName = skin.name
             view.sprites = SpriteCache.build(from: skin)
+            DispatchQueue.main.async { skinManager.clearSourceBitmaps() }
             view.updateVisualizer(colors: skin.visColors,
                                   isPlaying: roonAPI.currentZone?.state == .playing,
                                   mode: visualizerMode)

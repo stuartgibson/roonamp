@@ -29,17 +29,17 @@ struct PlaylistColors: Equatable {
 struct WinampSkin {
     let name: String
     let sourceURL: URL?
-    let mainWindowBitmap: NSImage?      // main.bmp
+    var mainWindowBitmap: NSImage?      // main.bmp
     let titleBarBitmap: NSImage?        // titlebar.bmp
-    let playPauseBitmap: NSImage?       // cbuttons.bmp (control buttons)
-    let positionBarBitmap: NSImage?     // posbar.bmp
-    let volumeBitmap: NSImage?          // volume.bmp
-    let playpausBitmap: NSImage?        // playpaus.bmp
+    var playPauseBitmap: NSImage?       // cbuttons.bmp (control buttons)
+    var positionBarBitmap: NSImage?     // posbar.bmp
+    var volumeBitmap: NSImage?          // volume.bmp
+    var playpausBitmap: NSImage?        // playpaus.bmp
     let textBitmap: NSImage?            // text.bmp
-    let numbersBitmap: NSImage?         // numbers.bmp
-    let monosterBitmap: NSImage?        // monoster.bmp
-    let shuffleRepeatBitmap: NSImage?   // shufrep.bmp
-    let balanceBitmap: NSImage?          // balance.bmp
+    var numbersBitmap: NSImage?         // numbers.bmp
+    var monosterBitmap: NSImage?        // monoster.bmp
+    var shuffleRepeatBitmap: NSImage?   // shufrep.bmp
+    var balanceBitmap: NSImage?          // balance.bmp
     let visColors: [Color]               // viscolor.txt (24 colors)
     let normalRegion: [[CGPoint]]?       // region.txt [Normal] polygons
     let windowShadeRegion: [[CGPoint]]?  // region.txt [WindowShade] polygons

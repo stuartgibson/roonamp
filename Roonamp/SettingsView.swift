@@ -19,6 +19,11 @@ struct SettingsView: View {
     @State private var showingImportError = false
     @State private var showingRemoveConfirmation = false
 
+    private var currentSkinEntry: SkinEntry? {
+        guard let name = skinManager.currentSkin?.name else { return nil }
+        return skinManager.availableSkins.first(where: { $0.name == name })
+    }
+
     var body: some View {
         Form {
             Section("Appearance") {
@@ -27,8 +32,8 @@ struct SettingsView: View {
                         get: { skinManager.currentSkin?.name ?? "" },
                         set: { skinManager.selectSkin(named: $0) }
                     )) {
-                        ForEach(skinManager.availableSkins, id: \.name) { skin in
-                            Text(skin.name).tag(skin.name)
+                        ForEach(skinManager.availableSkins) { entry in
+                            Text(entry.name).tag(entry.name)
                         }
                     }
                 } else {
@@ -41,7 +46,7 @@ struct SettingsView: View {
                         showingSkinImporter = true
                     }
 
-                    if let skin = skinManager.currentSkin, skinManager.isRemovable(skin) {
+                    if let entry = currentSkinEntry, skinManager.isRemovable(entry) {
                         Button("Remove Skin", role: .destructive) {
                             showingRemoveConfirmation = true
                         }
@@ -159,9 +164,9 @@ struct SettingsView: View {
         }
         .alert("Remove Skin", isPresented: $showingRemoveConfirmation) {
             Button("Remove", role: .destructive) {
-                if let skin = skinManager.currentSkin {
+                if let entry = currentSkinEntry {
                     do {
-                        try skinManager.removeSkin(skin)
+                        try skinManager.removeSkin(entry)
                     } catch {
                         importError = error.localizedDescription
                         showingImportError = true

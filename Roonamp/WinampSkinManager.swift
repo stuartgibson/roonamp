@@ -8,10 +8,17 @@
 import Foundation
 import Combine
 
+/// Lightweight metadata for a skin (no parsed bitmaps)
+struct SkinEntry: Identifiable {
+    let name: String
+    let sourceURL: URL
+    var id: String { name }
+}
+
 /// Manages Winamp skins
 @MainActor
 class WinampSkinManager: ObservableObject {
-    @Published var availableSkins: [WinampSkin] = []
+    @Published var availableSkins: [SkinEntry] = []
     @Published var currentSkin: WinampSkin? {
         didSet { UserDefaults.standard.set(currentSkin?.name, forKey: "selectedSkin") }
     }
@@ -19,53 +26,50 @@ class WinampSkinManager: ObservableObject {
     init() {
         loadAvailableSkins()
     }
-    
+
     func loadAvailableSkins() {
         print("🎨 Loading available Winamp skins...")
-        
-        var skins: [WinampSkin] = []
-        
-        // Load skins from main bundle
+
+        var entries: [SkinEntry] = []
+
+        // Collect skins from main bundle (metadata only)
         if let skinURLs = Bundle.main.urls(forResourcesWithExtension: "wsz", subdirectory: nil) {
             for url in skinURLs {
-                if let skin = WinampSkinParser.parse(url: url) {
-                    skins.append(skin)
-                }
+                let name = url.deletingPathExtension().lastPathComponent
+                entries.append(SkinEntry(name: name, sourceURL: url))
             }
         }
-        
+
         // Also check application support directory for user-added skins
         if let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first {
             let skinsDir = appSupport.appendingPathComponent("Roonamp/Skins")
-            
+
             if !FileManager.default.fileExists(atPath: skinsDir.path) {
                 try? FileManager.default.createDirectory(at: skinsDir, withIntermediateDirectories: true)
             }
-            
+
             if let skinURLs = try? FileManager.default.contentsOfDirectory(at: skinsDir, includingPropertiesForKeys: nil)
                 .filter({ $0.pathExtension == "wsz" }) {
                 for url in skinURLs {
-                    if let skin = WinampSkinParser.parse(url: url) {
-                        skins.append(skin)
-                    }
+                    let name = url.deletingPathExtension().lastPathComponent
+                    entries.append(SkinEntry(name: name, sourceURL: url))
                 }
             }
         }
-        
-        availableSkins = skins
-        print("✅ Loaded \(skins.count) Winamp skin(s)")
-        
-        // Restore saved skin or fall back to first available
+
+        availableSkins = entries
+        print("✅ Found \(entries.count) Winamp skin(s)")
+
+        // Restore saved skin or fall back to first available — parse on demand
         if currentSkin == nil {
-            if let saved = UserDefaults.standard.string(forKey: "selectedSkin"),
-               let match = skins.first(where: { $0.name == saved }) {
-                currentSkin = match
-            } else if let first = skins.first {
-                currentSkin = first
+            let saved = UserDefaults.standard.string(forKey: "selectedSkin")
+            let target = entries.first(where: { $0.name == saved }) ?? entries.first
+            if let entry = target {
+                selectSkin(named: entry.name)
             }
         }
     }
-    
+
     func importSkin(from url: URL) throws {
         guard let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
             throw NSError(domain: "WinampSkinManager", code: 1, userInfo: [NSLocalizedDescriptionKey: "Could not find Application Support directory"])
@@ -85,27 +89,46 @@ class WinampSkinManager: ObservableObject {
         selectSkin(named: importedName)
     }
 
-    func isRemovable(_ skin: WinampSkin) -> Bool {
-        guard let url = skin.sourceURL else { return false }
-        return !url.path.hasPrefix(Bundle.main.bundlePath)
+    func isRemovable(_ entry: SkinEntry) -> Bool {
+        return !entry.sourceURL.path.hasPrefix(Bundle.main.bundlePath)
     }
 
-    func removeSkin(_ skin: WinampSkin) throws {
-        guard let url = skin.sourceURL, isRemovable(skin) else { return }
-        try FileManager.default.removeItem(at: url)
+    func removeSkin(_ entry: SkinEntry) throws {
+        guard isRemovable(entry) else { return }
+        try FileManager.default.removeItem(at: entry.sourceURL)
 
-        let wasSelected = currentSkin?.name == skin.name
+        let wasSelected = currentSkin?.name == entry.name
         loadAvailableSkins()
 
         if wasSelected {
-            currentSkin = availableSkins.first
+            if let first = availableSkins.first {
+                selectSkin(named: first.name)
+            } else {
+                currentSkin = nil
+            }
         }
     }
 
     func selectSkin(named name: String) {
-        if let skin = availableSkins.first(where: { $0.name == name }) {
+        guard let entry = availableSkins.first(where: { $0.name == name }) else { return }
+        if currentSkin?.name == name { return }
+        if let skin = WinampSkinParser.parse(url: entry.sourceURL) {
             currentSkin = skin
             print("🎨 Selected skin: \(name)")
         }
+    }
+
+    /// Nil out source bitmaps that are no longer needed after sprite cache is built.
+    /// Keeps playlistBitmap, textBitmap, and titleBarBitmap (needed at runtime).
+    func clearSourceBitmaps() {
+        currentSkin?.mainWindowBitmap = nil
+        currentSkin?.playPauseBitmap = nil
+        currentSkin?.positionBarBitmap = nil
+        currentSkin?.volumeBitmap = nil
+        currentSkin?.balanceBitmap = nil
+        currentSkin?.playpausBitmap = nil
+        currentSkin?.numbersBitmap = nil
+        currentSkin?.monosterBitmap = nil
+        currentSkin?.shuffleRepeatBitmap = nil
     }
 }
