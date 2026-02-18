@@ -29,8 +29,11 @@ class PlaybackState: ObservableObject {
     }
     let seekPositionSubject = PassthroughSubject<Int, Never>()
 
-    /// Convenience publisher for `.onReceive()` in SwiftUI views.
-    var seekPositionPublisher: AnyPublisher<Int, Never> {
-        seekPositionSubject.eraseToAnyPublisher()
-    }
+    /// Throttled to 1 Hz — views interpolate between ticks so higher
+    /// frequency just wastes SwiftUI update cycles.
+    lazy var seekPositionPublisher: AnyPublisher<Int, Never> = {
+        seekPositionSubject
+            .throttle(for: .seconds(1), scheduler: DispatchQueue.main, latest: true)
+            .eraseToAnyPublisher()
+    }()
 }
