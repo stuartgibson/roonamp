@@ -1051,10 +1051,7 @@ struct WinampWindowShadeView: View {
 
             // Playback time in the second dark rectangle, right-aligned
             if let textBitmap = skin.textBitmap {
-                let seekPos = playback.state == .playing
-                    ? currentSeekPosition
-                    : playback.seekPosition
-                let timeText = formatCompactTime(seekPos)
+                let timeText = formatCompactTime(currentSeekPosition)
                 let charWidth = 5
                 let textWidth = timeText.count * charWidth
                 let rightEdge = WinampSkin.wsTimeRegion.x + WinampSkin.wsTimeRegion.width
@@ -1226,8 +1223,7 @@ struct WinampWindowShadeView: View {
     private func windowShadePositionBar(titleBarBitmap: NSImage) -> some View {
         let region = WinampSkin.wsPositionBarRegion
         let length = playback.nowPlaying?.length ?? 0
-        let seekPos = playback.state == .playing ? currentSeekPosition : playback.seekPosition
-        let progress = length > 0 ? min(1.0, max(0.0, Double(seekPos) / Double(length))) : 0.0
+        let progress = length > 0 ? min(1.0, max(0.0, Double(currentSeekPosition) / Double(length))) : 0.0
 
         WinampWindowShadePositionBar(
             bitmap: titleBarBitmap,

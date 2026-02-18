@@ -95,102 +95,103 @@ struct AlbumArtView: View {
                 .animation(.easeInOut(duration: 0.2), value: showTrackInfo)
             }
 
-            // Transport Controls Overlay (center)
-            HStack(spacing: 20) {
-                Button {
-                    if let zoneId = playback.zoneId {
-                        Task { await roonAPI.previous(zoneId: zoneId) }
+            // Transport Controls Overlay (center) — only in view tree when hovering
+            // to avoid expensive .glassEffect() evaluation every frame
+            if isHovering {
+                HStack(spacing: 20) {
+                    Button {
+                        if let zoneId = playback.zoneId {
+                            Task { await roonAPI.previous(zoneId: zoneId) }
+                        }
+                    } label: {
+                        Image(systemName: "backward.fill")
+                            .font(.system(size: 24))
                     }
-                } label: {
-                    Image(systemName: "backward.fill")
-                        .font(.system(size: 24))
-                }
-                .buttonStyle(.plain)
+                    .buttonStyle(.plain)
 
-                Button {
-                    if let zoneId = playback.zoneId {
-                        Task { await roonAPI.playPause(zoneId: zoneId) }
+                    Button {
+                        if let zoneId = playback.zoneId {
+                            Task { await roonAPI.playPause(zoneId: zoneId) }
+                        }
+                    } label: {
+                        Image(systemName: playback.state == .playing ? "pause.fill" : "play.fill")
+                            .font(.system(size: 32))
                     }
-                } label: {
-                    Image(systemName: playback.state == .playing ? "pause.fill" : "play.fill")
-                        .font(.system(size: 32))
-                }
-                .buttonStyle(.plain)
+                    .buttonStyle(.plain)
 
-                Button {
-                    if let zoneId = playback.zoneId {
-                        Task { await roonAPI.next(zoneId: zoneId) }
+                    Button {
+                        if let zoneId = playback.zoneId {
+                            Task { await roonAPI.next(zoneId: zoneId) }
+                        }
+                    } label: {
+                        Image(systemName: "forward.fill")
+                            .font(.system(size: 24))
                     }
-                } label: {
-                    Image(systemName: "forward.fill")
-                        .font(.system(size: 24))
+                    .buttonStyle(.plain)
                 }
-                .buttonStyle(.plain)
+                .foregroundStyle(.white)
+                .padding(16)
+                .glassEffect(.regular.interactive(), in: .capsule)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .transition(.opacity)
+
+                // Custom Traffic Lights Overlay
+                HStack(spacing: 8) {
+                    // Close button
+                    Button {
+                        #if os(macOS)
+                        NSApp.windows.first(where: { $0.title == "Album Art" })?.close()
+                        #endif
+                    } label: {
+                        Circle()
+                            .fill(Color.red)
+                            .frame(width: 12, height: 12)
+                            .overlay {
+                                Image(systemName: "xmark")
+                                    .font(.system(size: 6, weight: .bold))
+                                    .foregroundColor(.black.opacity(0.5))
+                            }
+                    }
+                    .buttonStyle(.plain)
+
+                    // Minimize button
+                    Button {
+                        #if os(macOS)
+                        NSApp.windows.first(where: { $0.title == "Album Art" })?.miniaturize(nil)
+                        #endif
+                    } label: {
+                        Circle()
+                            .fill(Color.yellow)
+                            .frame(width: 12, height: 12)
+                            .overlay {
+                                Image(systemName: "minus")
+                                    .font(.system(size: 6, weight: .bold))
+                                    .foregroundColor(.black.opacity(0.5))
+                            }
+                    }
+                    .buttonStyle(.plain)
+
+                    // Zoom button
+                    Button {
+                        #if os(macOS)
+                        NSApp.windows.first(where: { $0.title == "Album Art" })?.zoom(nil)
+                        #endif
+                    } label: {
+                        Circle()
+                            .fill(Color.green)
+                            .frame(width: 12, height: 12)
+                            .overlay {
+                                Image(systemName: "arrow.up.left.and.arrow.down.right")
+                                    .font(.system(size: 5, weight: .bold))
+                                    .foregroundColor(.black.opacity(0.5))
+                            }
+                    }
+                    .buttonStyle(.plain)
+                }
+                .padding(8)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                .transition(.opacity)
             }
-            .foregroundStyle(.white)
-            .padding(16)
-            .glassEffect(.regular.interactive(), in: .capsule)
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .opacity(isHovering ? 1 : 0)
-            .allowsHitTesting(isHovering)
-
-            // Custom Traffic Lights Overlay
-            HStack(spacing: 8) {
-                // Close button
-                Button {
-                    #if os(macOS)
-                    NSApp.windows.first(where: { $0.title == "Album Art" })?.close()
-                    #endif
-                } label: {
-                    Circle()
-                        .fill(Color.red)
-                        .frame(width: 12, height: 12)
-                        .overlay {
-                            Image(systemName: "xmark")
-                                .font(.system(size: 6, weight: .bold))
-                                .foregroundColor(.black.opacity(0.5))
-                        }
-                }
-                .buttonStyle(.plain)
-
-                // Minimize button
-                Button {
-                    #if os(macOS)
-                    NSApp.windows.first(where: { $0.title == "Album Art" })?.miniaturize(nil)
-                    #endif
-                } label: {
-                    Circle()
-                        .fill(Color.yellow)
-                        .frame(width: 12, height: 12)
-                        .overlay {
-                            Image(systemName: "minus")
-                                .font(.system(size: 6, weight: .bold))
-                                .foregroundColor(.black.opacity(0.5))
-                        }
-                }
-                .buttonStyle(.plain)
-
-                // Zoom button
-                Button {
-                    #if os(macOS)
-                    NSApp.windows.first(where: { $0.title == "Album Art" })?.zoom(nil)
-                    #endif
-                } label: {
-                    Circle()
-                        .fill(Color.green)
-                        .frame(width: 12, height: 12)
-                        .overlay {
-                            Image(systemName: "arrow.up.left.and.arrow.down.right")
-                                .font(.system(size: 5, weight: .bold))
-                                .foregroundColor(.black.opacity(0.5))
-                        }
-                }
-                .buttonStyle(.plain)
-            }
-            .padding(8)
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-            .opacity(isHovering ? 1 : 0)
-            .allowsHitTesting(isHovering)
         }
         .animation(.easeInOut(duration: 0.2), value: isHovering)
         .aspectRatio(1.0, contentMode: .fit)

@@ -124,8 +124,7 @@ struct WinampMainBridge: View {
         .onDisappear {
             stopPositionTimer()
         }
-        .onChange(of: playback.seekPosition) { oldValue, newValue in
-            let newPosition = newValue
+        .onReceive(playback.seekPositionPublisher) { newPosition in
             if let localSeek = localSeekPosition {
                 if abs(newPosition - localSeek) <= 3 {
                     localSeekPosition = nil
@@ -367,11 +366,19 @@ struct WinampMainNSViewRepresentable: NSViewRepresentable {
         }
 
         func setupSubscriptions(roonAPI: RoonAPI, view: WinampMainView) {
-            // Zone changes
+            // Zone changes (track, state, volume — but NOT high-frequency seek)
             roonAPI.$currentZone
                 .receive(on: DispatchQueue.main)
                 .sink { [weak view] zone in
                     view?.updateZone(zone)
+                }
+                .store(in: &cancellables)
+
+            // Seek position (high-frequency, separate from zone changes)
+            roonAPI.playback.seekPositionPublisher
+                .receive(on: DispatchQueue.main)
+                .sink { [weak view] seekPos in
+                    view?.updateSeekPosition(seekPos)
                 }
                 .store(in: &cancellables)
 

@@ -879,6 +879,20 @@ final class WinampMainView: NSView {
         updateClutterbar()
     }
 
+    func updateSeekPosition(_ newPos: Int) {
+        cachedSeekPosition = newPos
+        if let localSeek = localSeekPosition {
+            if abs(newPos - localSeek) <= 3 {
+                localSeekPosition = nil
+                currentSeekPosition = newPos
+                lastUpdateTime = Date()
+            }
+        } else {
+            currentSeekPosition = newPos
+            lastUpdateTime = Date()
+        }
+    }
+
     func updateAlwaysOnTop(_ onTop: Bool) {
         guard onTop != cachedAlwaysOnTop else { return }
         cachedAlwaysOnTop = onTop

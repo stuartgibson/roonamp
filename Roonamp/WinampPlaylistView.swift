@@ -24,6 +24,7 @@ struct WinampPlaylistView: View {
     @AppStorage("showRemaining") private var showRemaining: Bool = false
     @AppStorage("playlistWindowShade") private var isPlaylistShade: Bool = false
     @State private var selectedItemId: Int? = nil
+    @State private var currentSeekPosition: Int = 0
     @StateObject private var scrollState = PlaylistScrollState()
 
     private var currentHeight: CGFloat {
@@ -106,10 +107,14 @@ struct WinampPlaylistView: View {
         ))
         .onAppear {
             roonAPI.isPlaylistVisible = true
+            currentSeekPosition = playback.seekPosition
             Task { await roonAPI.fetchQueue() }
         }
         .onDisappear {
             roonAPI.isPlaylistVisible = false
+        }
+        .onReceive(playback.seekPositionPublisher) { newPosition in
+            currentSeekPosition = newPosition
         }
     }
 
@@ -666,7 +671,7 @@ struct WinampPlaylistView: View {
             let textSkinId = "\(Unmanaged.passUnretained(textBitmap).toOpaque())"
             let w = playlistSize.width
             let h = playlistSize.height
-            let seekPos = playback.seekPosition
+            let seekPos = currentSeekPosition
             let timeText = formatCompactTime(seekPos)
             let charWidth: CGFloat = 5
             let textWidth = CGFloat(timeText.count) * charWidth
