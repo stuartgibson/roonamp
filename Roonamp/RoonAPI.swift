@@ -29,6 +29,7 @@ class RoonAPI: ObservableObject {
                     restoreQueueState()
                 }
             }
+            syncPlayback()
         }
     }
     let playback = PlaybackState()
@@ -304,36 +305,15 @@ class RoonAPI: ObservableObject {
         }
 
         // Handle seek changes (high frequency, only updates seek position)
+        // NOTE: We intentionally do NOT update the @Published zones array here,
+        // as that would fire roonAPI.objectWillChange on every tick and cause
+        // all observing views to re-evaluate unnecessarily.
         var seekOnly = false
         if let seekChanged = data["zones_seek_changed"] as? [[String: Any]] {
             seekOnly = (data["zones_changed"] == nil && data["zones"] == nil && data["zones_removed"] == nil)
             for seekData in seekChanged {
                 guard let zoneId = seekData["zone_id"] as? String,
                       let seekPos = seekData["seek_position"] as? Int else { continue }
-                if let idx = zones.firstIndex(where: { $0.id == zoneId }),
-                   let nowPlaying = zones[idx].nowPlaying {
-                    let updatedNP = NowPlaying(
-                        queueItemId: nowPlaying.queueItemId,
-                        title: nowPlaying.title,
-                        artist: nowPlaying.artist,
-                        album: nowPlaying.album,
-                        imageKey: nowPlaying.imageKey,
-                        imageUrl: nowPlaying.imageUrl,
-                        length: nowPlaying.length,
-                        seekPosition: seekPos,
-                        sampleRate: nowPlaying.sampleRate,
-                        bitsPerSample: nowPlaying.bitsPerSample,
-                        channels: nowPlaying.channels
-                    )
-                    zones[idx] = RoonZone(
-                        id: zones[idx].id,
-                        displayName: zones[idx].displayName,
-                        state: zones[idx].state,
-                        nowPlaying: updatedNP,
-                        settings: zones[idx].settings,
-                        volume: zones[idx].volume
-                    )
-                }
                 // Update playback seek position for current zone
                 if zoneId == currentZone?.id {
                     playback.seekPosition = seekPos
@@ -347,7 +327,6 @@ class RoonAPI: ObservableObject {
            let updated = zones.first(where: { $0.id == selectedId }) {
             let oldTitle = currentZone?.nowPlaying?.title
             currentZone = updated
-            syncPlayback()
 
             // When now_playing track changes, re-subscribe queue to get fresh data
             if let newTitle = updated.nowPlaying?.title,
@@ -461,7 +440,6 @@ class RoonAPI: ObservableObject {
         if let selectedZoneId = selectedZoneId {
             if let updatedZone = zones.first(where: { $0.id == selectedZoneId }) {
                 currentZone = updatedZone
-                syncPlayback()
             } else {
                 restoreLastZone()
             }
@@ -474,12 +452,10 @@ class RoonAPI: ObservableObject {
         if let lastZoneId = UserDefaults.standard.string(forKey: "lastSelectedZoneId") {
             if let restoredZone = zones.first(where: { $0.id == lastZoneId }) {
                 currentZone = restoredZone
-                syncPlayback()
                 return
             }
         }
         currentZone = zones.first
-        syncPlayback()
     }
 
     private func parseZone(from data: [String: Any]) -> RoonZone? {
@@ -699,7 +675,6 @@ class RoonAPI: ObservableObject {
 
             if currentZone?.id == zoneId {
                 currentZone = updatedZone
-                syncPlayback()
             }
         }
     }
