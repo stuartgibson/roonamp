@@ -7,6 +7,7 @@
 
 import SwiftUI
 import Combine
+import IOSurface
 
 // Environment key for pixel-perfect scaling (avoids bilinear .scaleEffect)
 private struct WinampScaleKey: EnvironmentKey {
@@ -70,6 +71,9 @@ final class VisualizerRenderer {
 
     let colorSpace = CGColorSpace(name: CGColorSpace.sRGB)!
 
+    // IOSurface for direct compositing — avoids per-frame color conversion in CA::Render
+    let ioSurface: IOSurface
+
     init(colors: [Color], sourceWidth: Int = 76, sourceHeight: Int = 16,
          barCount: Int = 19, scale: CGFloat) {
         self.sourceWidth = sourceWidth
@@ -86,7 +90,8 @@ final class VisualizerRenderer {
         self.bytesPerRow = iW * 4
         self.pixelCount = iW * iH
 
-        // Pack CGColor → UInt32 (noneSkipLast on little-endian: memory is R,G,B,X → UInt32 = X<<24|B<<16|G<<8|R)
+        // Pack CGColor → UInt32 BGRA (memory is B,G,R,A on little-endian → UInt32 = A<<24|R<<16|G<<8|B)
+        // Matches kCVPixelFormatType_32BGRA for IOSurface zero-copy compositing
         let allCGColors = colors.map { NSColor($0).usingColorSpace(.sRGB)?.cgColor ?? CGColor(red: 0, green: 0, blue: 0, alpha: 1) }
         func pack(_ c: CGColor) -> UInt32 {
             let srgb = c.converted(to: CGColorSpace(name: CGColorSpace.sRGB)!, intent: .defaultIntent, options: nil) ?? c
@@ -95,7 +100,7 @@ final class VisualizerRenderer {
             let r = UInt32(max(0, min(255, Int(comp[0] * 255))))
             let g = UInt32(n > 1 ? max(0, min(255, Int(comp[1] * 255))) : 0)
             let b = UInt32(n > 2 ? max(0, min(255, Int(comp[2] * 255))) : 0)
-            return r | (g << 8) | (b << 16) | (0xFF << 24)
+            return b | (g << 8) | (r << 16) | (0xFF << 24)
         }
 
         let bgPacked = allCGColors.count > 0 ? pack(allCGColors[0]) : 0xFF000000
@@ -158,6 +163,16 @@ final class VisualizerRenderer {
             peakValues[pvi] = 0
             pvi += 1
         }
+
+        // Create IOSurface for zero-copy compositing (avoids CA color conversion)
+        let props: [IOSurfacePropertyKey: Any] = [
+            .width: iW,
+            .height: iH,
+            .bytesPerElement: 4,
+            .bytesPerRow: iW * 4,
+            .pixelFormat: kCVPixelFormatType_32BGRA
+        ]
+        self.ioSurface = IOSurface(properties: props)!
     }
 
     deinit {
@@ -168,7 +183,8 @@ final class VisualizerRenderer {
         peakValues.deallocate()
     }
 
-    func renderFrame(time: Double, mode: VisualizerMode, isPlaying: Bool) -> CGImage? {
+    /// Render a frame into the IOSurface and return it for direct CALayer compositing.
+    func renderFrame(time: Double, mode: VisualizerMode, isPlaying: Bool) -> IOSurface {
         let iW = imgWidth
         let iH = imgHeight
         let ps = devicePixelScale
@@ -266,17 +282,13 @@ final class VisualizerRenderer {
             }
         }
 
-        // Create CGImage directly from frame buffer (no copy via CFData retain)
-        guard let provider = CGDataProvider(dataInfo: nil,
-                                             data: frameBuffer,
-                                             size: pixelCount * 4,
-                                             releaseData: { _, _, _ in }) else { return nil }
-        return CGImage(width: iW, height: iH,
-                       bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: iW * 4,
-                       space: colorSpace,
-                       bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipLast.rawValue),
-                       provider: provider,
-                       decode: nil, shouldInterpolate: false, intent: .defaultIntent)
+        // Copy frame buffer into IOSurface
+        ioSurface.lock(options: [], seed: nil)
+        let dest = ioSurface.baseAddress
+        memcpy(dest, frameBuffer, pixelCount * 4)
+        ioSurface.unlock(options: [], seed: nil)
+
+        return ioSurface
     }
 
     func amplitudeForBar(_ i: Int, time: Double) -> Double {
@@ -314,11 +326,11 @@ final class VisualizerLayerView: NSView {
     func startRenderTimer() {
         guard renderTimer == nil else { return }
         renderTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 15.0, repeats: true) { [weak self] _ in
-            guard let self = self else { return }
-            let now = CFAbsoluteTimeGetCurrent()
-            if let image = self.renderer?.renderFrame(time: now, mode: self.mode, isPlaying: self.isPlaying) {
-                self.layer?.contents = image
-            }
+            guard let self = self, let renderer = self.renderer, let layer = self.layer else { return }
+            let surface = renderer.renderFrame(time: CFAbsoluteTimeGetCurrent(), mode: self.mode, isPlaying: self.isPlaying)
+            // Same IOSurface object is reused — force CALayer to pick up new pixels
+            layer.contents = nil
+            layer.contents = surface
         }
     }
 
@@ -326,8 +338,9 @@ final class VisualizerLayerView: NSView {
         renderTimer?.invalidate()
         renderTimer = nil
         // Render one static frame
-        if let image = renderer?.renderFrame(time: 0, mode: mode, isPlaying: isPlaying) {
-            layer?.contents = image
+        if let renderer = renderer {
+            let surface = renderer.renderFrame(time: 0, mode: mode, isPlaying: isPlaying)
+            layer?.contents = surface
         }
     }
 
