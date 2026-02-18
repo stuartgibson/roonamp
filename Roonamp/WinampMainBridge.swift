@@ -199,8 +199,14 @@ struct WinampMainNSViewRepresentable: NSViewRepresentable {
         view.showRemaining = showRemaining
         view.displayKbps = displayKbps
         view.displayKHz = displayKHz
-        view.sprites = SpriteCache.build(from: skin)
-        DispatchQueue.main.async { skinManager.clearSourceBitmaps() }
+        if let cached = skinManager.currentSpriteCache {
+            view.sprites = cached
+        } else {
+            let sprites = SpriteCache.build(from: skin)
+            skinManager.currentSpriteCache = sprites
+            view.sprites = sprites
+            DispatchQueue.main.async { skinManager.clearSourceBitmaps() }
+        }
 
         // Wire up callbacks
         wireCallbacks(view, context: context)
@@ -244,7 +250,9 @@ struct WinampMainNSViewRepresentable: NSViewRepresentable {
         // Skin change
         if context.coordinator.currentSkinName != skin.name {
             context.coordinator.currentSkinName = skin.name
-            view.sprites = SpriteCache.build(from: skin)
+            let sprites = SpriteCache.build(from: skin)
+            skinManager.currentSpriteCache = sprites
+            view.sprites = sprites
             DispatchQueue.main.async { skinManager.clearSourceBitmaps() }
             view.updateVisualizer(colors: skin.visColors,
                                   isPlaying: roonAPI.currentZone?.state == .playing,
@@ -418,6 +426,18 @@ struct WinampMainNSViewRepresentable: NSViewRepresentable {
                     if let visible = notification.object as? Bool {
                         roonAPI.isAlbumArtVisible = visible
                     }
+                }
+                .store(in: &cancellables)
+
+            // Settings window visibility
+            NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)
+                .merge(with: NotificationCenter.default.publisher(for: NSWindow.willCloseNotification))
+                .receive(on: DispatchQueue.main)
+                .sink { [weak view] notification in
+                    guard let window = notification.object as? NSWindow,
+                          window.identifier?.rawValue == "com_apple_SwiftUI_Settings_window" else { return }
+                    let visible = notification.name == NSWindow.didBecomeKeyNotification
+                    view?.updateSettingsVisible(visible)
                 }
                 .store(in: &cancellables)
         }

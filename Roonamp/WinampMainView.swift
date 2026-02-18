@@ -27,8 +27,9 @@ struct SpriteCache {
     let titleBtnShade: (normal: CGImage?, pressed: CGImage?)
     let titleBtnClose: (normal: CGImage?, pressed: CGImage?)
 
-    // Clutterbar background + active overlays for A, I, D
+    // Clutterbar background + active overlays for O, A, I, D
     let clutterBg: CGImage?
+    let clutterO: CGImage?
     let clutterA: CGImage?
     let clutterI: CGImage?
     let clutterD: CGImage?
@@ -133,6 +134,7 @@ struct SpriteCache {
 
         // Clutterbar
         let clutterBg = crop(titleCG, CGRect(x: 304, y: 0, width: 8, height: 43))
+        let clutterO = crop(titleCG, CGRect(x: 304, y: 47, width: 8, height: 8))
         let clutterA = crop(titleCG, CGRect(x: 312, y: 55, width: 8, height: 7))
         let clutterI = crop(titleCG, CGRect(x: 320, y: 62, width: 8, height: 7))
         let clutterD = crop(titleCG, CGRect(x: 328, y: 69, width: 8, height: 8))
@@ -252,6 +254,7 @@ struct SpriteCache {
             titleBtnShade: titleBtnShade,
             titleBtnClose: titleBtnClose,
             clutterBg: clutterBg,
+            clutterO: clutterO,
             clutterA: clutterA,
             clutterI: clutterI,
             clutterD: clutterD,
@@ -332,6 +335,7 @@ final class WinampMainView: NSView {
     private var cachedIsPlaylistVisible: Bool = false
     private var cachedIsAlbumArtVisible: Bool = false
     private var cachedAlwaysOnTop: Bool = false
+    private var cachedIsSettingsVisible: Bool = false
     private var cachedIsWindowActive: Bool = true
 
     // Timer state
@@ -759,6 +763,10 @@ final class WinampMainView: NSView {
 
         // Draw active overlays (coordinates are in flipped space, but CGContext is bottom-up)
         // clutterbar is 8x43, overlays at specific y offsets
+        // O at yOffset=3, height=8
+        if cachedIsSettingsVisible, let img = sp.clutterO {
+            ctx.draw(img, in: CGRect(x: 0, y: CGFloat(h) - 3 - 8, width: 8, height: 8))
+        }
         // A at yOffset=11, height=7
         if cachedAlwaysOnTop, let img = sp.clutterA {
             ctx.draw(img, in: CGRect(x: 0, y: CGFloat(h) - 11 - 7, width: 8, height: 7))
@@ -910,6 +918,12 @@ final class WinampMainView: NSView {
     func updateAlwaysOnTop(_ onTop: Bool) {
         guard onTop != cachedAlwaysOnTop else { return }
         cachedAlwaysOnTop = onTop
+        updateClutterbar()
+    }
+
+    func updateSettingsVisible(_ visible: Bool) {
+        guard visible != cachedIsSettingsVisible else { return }
+        cachedIsSettingsVisible = visible
         updateClutterbar()
     }
 

@@ -22,6 +22,8 @@ class WinampSkinManager: ObservableObject {
     @Published var currentSkin: WinampSkin? {
         didSet { UserDefaults.standard.set(currentSkin?.name, forKey: "selectedSkin") }
     }
+    /// Cached sprite cache for the current skin — survives view recreation (e.g. windowshade toggle)
+    var currentSpriteCache: SpriteCache?
 
     init() {
         loadAvailableSkins()
@@ -113,6 +115,7 @@ class WinampSkinManager: ObservableObject {
         guard let entry = availableSkins.first(where: { $0.name == name }) else { return }
         if currentSkin?.name == name { return }
         if let skin = WinampSkinParser.parse(url: entry.sourceURL) {
+            currentSpriteCache = nil
             currentSkin = skin
             print("🎨 Selected skin: \(name)")
         }
