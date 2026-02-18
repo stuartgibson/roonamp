@@ -9,12 +9,23 @@ import SwiftUI
 
 #if os(macOS)
 class AppDelegate: NSObject, NSApplicationDelegate {
+    /// Shared reference set once the SwiftUI scene's skinManager is available.
+    nonisolated(unsafe) static var sharedSkinManager: WinampSkinManager?
+
     override init() {
         super.init()
-        // Prevent macOS from restoring stale window state across launches.
-        // Without this, closing the main window saves "no window" state that
-        // persists and prevents the window from appearing on next launch.
         UserDefaults.standard.set(true, forKey: "ApplePersistenceIgnoreState")
+    }
+
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        // Register our own handler for open-document Apple Events BEFORE SwiftUI
+        // installs its handler. This prevents SwiftUI from spawning a new window.
+        NSAppleEventManager.shared().setEventHandler(
+            self,
+            andSelector: #selector(handleOpenDocuments(_:withReply:)),
+            forEventClass: AEEventClass(kCoreEventClass),
+            andEventID: AEEventID(kAEOpenDocuments)
+        )
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
@@ -26,6 +37,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             WinampWindow.current?.makeKeyAndOrderFront(nil)
         }
         return true
+    }
+
+    @objc private func handleOpenDocuments(_ event: NSAppleEventDescriptor, withReply reply: NSAppleEventDescriptor) {
+        guard let directObject = event.paramDescriptor(forKeyword: keyDirectObject) else { return }
+        for i in 1...directObject.numberOfItems {
+            guard let urlString = directObject.atIndex(i)?.stringValue,
+                  let url = URL(string: urlString),
+                  url.pathExtension.lowercased() == "wsz" else { continue }
+            try? AppDelegate.sharedSkinManager?.importSkin(from: url)
+            return
+        }
     }
 }
 #endif
@@ -53,14 +75,19 @@ struct RoonampApp: App {
 
     var body: some Scene {
         WindowGroup {
-            if let skin = skinManager.currentSkin {
-                WinampSkinView(skin: skin)
-                    .environmentObject(roonAPI)
-                    .environmentObject(skinManager)
-            } else {
-                ContentView(showAlbumArt: $showAlbumArt)
-                    .environmentObject(roonAPI)
-                    .environmentObject(skinManager)
+            Group {
+                if let skin = skinManager.currentSkin {
+                    WinampSkinView(skin: skin)
+                        .environmentObject(roonAPI)
+                        .environmentObject(skinManager)
+                } else {
+                    ContentView(showAlbumArt: $showAlbumArt)
+                        .environmentObject(roonAPI)
+                        .environmentObject(skinManager)
+                }
+            }
+            .onAppear {
+                AppDelegate.sharedSkinManager = skinManager
             }
         }
         .windowStyle(.hiddenTitleBar)

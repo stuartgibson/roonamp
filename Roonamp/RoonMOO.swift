@@ -197,6 +197,7 @@ actor RoonMOO {
         // Find the header/body separator: \n\n
         let bytes = [UInt8](data)
         var headerEnd = -1
+        guard bytes.count >= 2 else { return nil }
         for i in 0..<(bytes.count - 1) {
             if bytes[i] == 0x0A && bytes[i + 1] == 0x0A {
                 headerEnd = i

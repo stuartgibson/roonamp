@@ -619,6 +619,333 @@ enum VisualizerMode: CaseIterable {
     case off
 }
 
+// MARK: - Visualizer rendering engine (bypasses SwiftUI image pipeline)
+
+/// Manages a persistent pixel buffer and renders visualizer frames via CALayer.
+private final class VisualizerRenderer {
+    let sourceWidth: Int
+    let sourceHeight: Int
+    let barCount: Int
+    let devicePixelScale: Int
+    let imgWidth: Int
+    let imgHeight: Int
+    let bytesPerRow: Int
+
+    // Pre-computed pixel data (row 0 = top of screen in memory)
+    let backgroundPixels: UnsafeMutablePointer<UInt32>
+    let barRowColors: UnsafeMutablePointer<UInt32>   // sourceHeight entries, index 0 = top of screen
+    let peakColor: UInt32
+    let oscColors: UnsafeMutablePointer<UInt32>      // 5 entries
+    let pixelCount: Int
+
+    // Reusable frame buffer
+    let frameBuffer: UnsafeMutablePointer<UInt32>
+
+    // Peak state
+    var peakValues: UnsafeMutablePointer<Double>
+
+    // Spectrum data
+    static let spectrumData: Data? = {
+        guard let url = Bundle.main.url(forResource: "spectrum_data", withExtension: "bin"),
+              let data = try? Data(contentsOf: url) else { return nil }
+        return data
+    }()
+    static let spectrumBands = 19
+    static var spectrumFrameCount: Int {
+        (spectrumData?.count ?? 0) / spectrumBands
+    }
+
+    let colorSpace = CGColorSpace(name: CGColorSpace.sRGB)!
+
+    init(colors: [Color], sourceWidth: Int = 76, sourceHeight: Int = 16,
+         barCount: Int = 19, scale: CGFloat) {
+        self.sourceWidth = sourceWidth
+        self.sourceHeight = sourceHeight
+        self.barCount = barCount
+
+        let backing = NSScreen.main?.backingScaleFactor ?? 2.0
+        let ps = max(1, Int(scale * backing))
+        self.devicePixelScale = ps
+        let iW = sourceWidth * ps
+        let iH = sourceHeight * ps
+        self.imgWidth = iW
+        self.imgHeight = iH
+        self.bytesPerRow = iW * 4
+        self.pixelCount = iW * iH
+
+        // Pack CGColor → UInt32 (noneSkipLast on little-endian: memory is R,G,B,X → UInt32 = X<<24|B<<16|G<<8|R)
+        let allCGColors = colors.map { NSColor($0).usingColorSpace(.sRGB)?.cgColor ?? CGColor(red: 0, green: 0, blue: 0, alpha: 1) }
+        func pack(_ c: CGColor) -> UInt32 {
+            let srgb = c.converted(to: CGColorSpace(name: CGColorSpace.sRGB)!, intent: .defaultIntent, options: nil) ?? c
+            let n = srgb.numberOfComponents
+            let comp = srgb.components ?? [0, 0, 0, 1]
+            let r = UInt32(max(0, min(255, Int(comp[0] * 255))))
+            let g = UInt32(n > 1 ? max(0, min(255, Int(comp[1] * 255))) : 0)
+            let b = UInt32(n > 2 ? max(0, min(255, Int(comp[2] * 255))) : 0)
+            return r | (g << 8) | (b << 16) | (0xFF << 24)
+        }
+
+        let bgPacked = allCGColors.count > 0 ? pack(allCGColors[0]) : 0xFF000000
+        let gridPacked = allCGColors.count > 1 ? pack(allCGColors[1]) : 0xFF000000
+        self.peakColor = allCGColors.count > 23 ? pack(allCGColors[23]) : 0xFFFFFFFF
+
+        self.oscColors = .allocate(capacity: 5)
+        var oi = 0
+        while oi < 5 {
+            let idx = 18 + oi
+            oscColors[oi] = idx < allCGColors.count ? pack(allCGColors[idx]) : 0xFF00FF00
+            oi += 1
+        }
+
+        // Build background pixels (row 0 = top of screen)
+        self.backgroundPixels = .allocate(capacity: iW * iH)
+        // Fill with background color
+        var pi = 0
+        while pi < iW * iH {
+            backgroundPixels[pi] = bgPacked
+            pi += 1
+        }
+        // Grid dots at every other source pixel
+        var gy = 0
+        while gy < sourceHeight {
+            var gx = 0
+            while gx < sourceWidth {
+                // Fill the ps×ps block for this grid dot
+                var dy = 0
+                while dy < ps {
+                    let row = gy * ps + dy
+                    var dx = 0
+                    while dx < ps {
+                        backgroundPixels[row * iW + gx * ps + dx] = gridPacked
+                        dx += 1
+                    }
+                    dy += 1
+                }
+                gx += 2
+            }
+            gy += 2
+        }
+
+        // Bar row colors: index by screen row (0=top). Top of vis = ci=3, bottom = ci=17
+        self.barRowColors = .allocate(capacity: sourceHeight)
+        var sy = 0
+        while sy < sourceHeight {
+            // sy=0 is top of screen → corresponds to py=sourceHeight-1 (top of bar, cool)
+            let py = sourceHeight - 1 - sy
+            let scaledPy = sourceHeight >= 16 ? (py & ~1) : Int(Double(py) / Double(sourceHeight - 1) * 16) & ~1
+            let ci = min(17, 17 - scaledPy)
+            barRowColors[sy] = ci >= 0 && ci < allCGColors.count ? pack(allCGColors[ci]) : 0xFF00FF00
+            sy += 1
+        }
+
+        self.frameBuffer = .allocate(capacity: iW * iH)
+        self.peakValues = .allocate(capacity: barCount)
+        var pvi = 0
+        while pvi < barCount {
+            peakValues[pvi] = 0
+            pvi += 1
+        }
+    }
+
+    deinit {
+        backgroundPixels.deallocate()
+        barRowColors.deallocate()
+        oscColors.deallocate()
+        frameBuffer.deallocate()
+        peakValues.deallocate()
+    }
+
+    func renderFrame(time: Double, mode: VisualizerMode, isPlaying: Bool) -> CGImage? {
+        let iW = imgWidth
+        let iH = imgHeight
+        let ps = devicePixelScale
+        let h = sourceHeight
+        let w = sourceWidth
+
+        // Copy background to frame buffer
+        memcpy(frameBuffer, backgroundPixels, pixelCount * 4)
+
+        if isPlaying && mode != .off {
+            switch mode {
+            case .spectrum:
+                let barW = 3 * ps
+                var i = 0
+                while i < barCount {
+                    let amplitude = amplitudeForBar(i, time: time)
+                    if amplitude >= peakValues[i] {
+                        peakValues[i] = amplitude
+                    } else {
+                        peakValues[i] = max(0, peakValues[i] - 0.02)
+                    }
+                    let barHeight = Int(amplitude * Double(h))
+                    if barHeight > 0 {
+                        let sx = i * 4 * ps
+                        let topRow = (h - barHeight) * ps
+                        let bottomRow = h * ps
+                        var row = topRow
+                        while row < bottomRow {
+                            let screenY = row / ps  // source screen y
+                            let color = barRowColors[screenY]
+                            let rowBase = row * iW + sx
+                            var col = 0
+                            while col < barW {
+                                frameBuffer[rowBase + col] = color
+                                col += 1
+                            }
+                            row += 1
+                        }
+                    }
+                    // Peak dot
+                    let peakPixel = Int(peakValues[i] * Double(h - 1))
+                    if peakPixel > 0 {
+                        let sx = i * 4 * ps
+                        let peakScreenY = (h - 1 - peakPixel) * ps
+                        var dy = 0
+                        while dy < ps {
+                            let rowBase = (peakScreenY + dy) * iW + sx
+                            var col = 0
+                            while col < barW {
+                                frameBuffer[rowBase + col] = peakColor
+                                col += 1
+                            }
+                            dy += 1
+                        }
+                    }
+                    i += 1
+                }
+            case .oscilloscope:
+                var bandAmps = [Double](repeating: 0, count: barCount)
+                var i = 0
+                while i < barCount {
+                    bandAmps[i] = amplitudeForBar(i, time: time)
+                    i += 1
+                }
+                var x = 0
+                while x < w {
+                    let bandPos = Double(x) / Double(w - 1) * Double(barCount - 1)
+                    let lo = Int(bandPos)
+                    let hi = min(lo + 1, barCount - 1)
+                    let frac = bandPos - Double(lo)
+                    let amp = bandAmps[lo] * (1 - frac) + bandAmps[hi] * frac
+                    let screenY = max(0, min(h - 1, Int(Double(h - 1) * (1 - amp))))
+                    let dist = abs(screenY - h / 2)
+                    let maxDist = h / 2
+                    let ci: Int
+                    if maxDist <= 3 {
+                        ci = dist == 0 ? 0 : dist == 1 ? 2 : 4
+                    } else {
+                        ci = dist <= 1 ? 0 : dist <= 3 ? 1 : dist <= 5 ? 2 : dist <= 6 ? 3 : 4
+                    }
+                    let color = oscColors[ci]
+                    var dy = 0
+                    while dy < ps {
+                        let rowBase = (screenY * ps + dy) * iW + x * ps
+                        var dx = 0
+                        while dx < ps {
+                            frameBuffer[rowBase + dx] = color
+                            dx += 1
+                        }
+                        dy += 1
+                    }
+                    x += 1
+                }
+            case .off: break
+            }
+        }
+
+        // Create CGImage directly from frame buffer (no copy via CFData retain)
+        guard let provider = CGDataProvider(dataInfo: nil,
+                                             data: frameBuffer,
+                                             size: pixelCount * 4,
+                                             releaseData: { _, _, _ in }) else { return nil }
+        return CGImage(width: iW, height: iH,
+                       bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: iW * 4,
+                       space: colorSpace,
+                       bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipLast.rawValue),
+                       provider: provider,
+                       decode: nil, shouldInterpolate: false, intent: .defaultIntent)
+    }
+
+    func amplitudeForBar(_ i: Int, time: Double) -> Double {
+        let bandIndex = barCount < Self.spectrumBands
+            ? Int(Double(i) / Double(barCount) * Double(Self.spectrumBands))
+            : i
+        guard let data = Self.spectrumData, Self.spectrumFrameCount > 0 else {
+            let freq = Double(bandIndex) / Double(Self.spectrumBands)
+            let base = (1.0 - freq * 0.5) * 0.55
+            return max(0, min(1, base + sin(time * 2.3 + Double(bandIndex) * 0.5) * 0.25))
+        }
+        let frameIndex = Int(time * 30) % Self.spectrumFrameCount
+        let offset = frameIndex * Self.spectrumBands + min(bandIndex, Self.spectrumBands - 1)
+        return Double(data[offset]) / 255.0
+    }
+}
+
+/// NSView that renders the visualizer directly via CALayer, bypassing SwiftUI image pipeline.
+private final class VisualizerLayerView: NSView {
+    var renderer: VisualizerRenderer?
+    var mode: VisualizerMode = .spectrum
+    var isPlaying: Bool = false
+    var colorHash: Int = 0
+    private var displayLink: CVDisplayLink?
+    private var lastRenderTime: CFTimeInterval = 0
+    private let minFrameInterval: CFTimeInterval = 1.0 / 15.0  // 15fps cap
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+        layer?.magnificationFilter = .nearest
+        layer?.contentsGravity = .resize
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    func startDisplayLink() {
+        guard displayLink == nil else { return }
+        CVDisplayLinkCreateWithActiveCGDisplays(&displayLink)
+        guard let dl = displayLink else { return }
+        CVDisplayLinkSetOutputCallback(dl, { (_, inNow, _, _, _, userInfo) -> CVReturn in
+            let view = Unmanaged<VisualizerLayerView>.fromOpaque(userInfo!).takeUnretainedValue()
+            let now = CFAbsoluteTimeGetCurrent()
+            guard now - view.lastRenderTime >= view.minFrameInterval else { return kCVReturnSuccess }
+            view.lastRenderTime = now
+            if let image = view.renderer?.renderFrame(time: now, mode: view.mode, isPlaying: view.isPlaying) {
+                DispatchQueue.main.async {
+                    view.layer?.contents = image
+                }
+            }
+            return kCVReturnSuccess
+        }, Unmanaged.passUnretained(self).toOpaque())
+        CVDisplayLinkStart(dl)
+    }
+
+    func stopDisplayLink() {
+        if let dl = displayLink {
+            CVDisplayLinkStop(dl)
+            displayLink = nil
+        }
+        // Render one static frame
+        if let image = renderer?.renderFrame(time: 0, mode: mode, isPlaying: isPlaying) {
+            layer?.contents = image
+        }
+    }
+
+    func updateAnimation() {
+        let shouldAnimate = isPlaying && mode != .off
+        if shouldAnimate {
+            startDisplayLink()
+        } else {
+            stopDisplayLink()
+        }
+    }
+
+    deinit {
+        if let dl = displayLink {
+            CVDisplayLinkStop(dl)
+        }
+    }
+}
+
 struct WinampVisualizer: View {
     let colors: [Color]
     let isPlaying: Bool
@@ -627,25 +954,9 @@ struct WinampVisualizer: View {
     @Binding var mode: VisualizerMode
     var handleTapCycle: Bool = true
 
-    @State private var peakState: VisualizerPeaks
-
-    // Pre-computed RGB bytes — avoids Color→NSColor conversion every frame
-    private let colorRGB: [(UInt8, UInt8, UInt8)]
-
     private let width: Int
     private let height: Int
     private let barCount: Int
-
-    // Precomputed spectrum data from real audio analysis
-    private static let spectrumData: Data? = {
-        guard let url = Bundle.main.url(forResource: "spectrum_data", withExtension: "bin"),
-              let data = try? Data(contentsOf: url) else { return nil }
-        return data
-    }()
-    private static let spectrumBands = 19
-    private static var spectrumFrameCount: Int {
-        (spectrumData?.count ?? 0) / spectrumBands
-    }
 
     init(colors: [Color], isPlaying: Bool, region: WinampSkin.ButtonRegion, scale: CGFloat,
          mode: Binding<VisualizerMode>, handleTapCycle: Bool = true,
@@ -659,159 +970,78 @@ struct WinampVisualizer: View {
         self.width = sourceWidth
         self.height = sourceHeight
         self.barCount = barCount
-        self._peakState = State(initialValue: VisualizerPeaks(count: barCount))
-        self.colorRGB = colors.map { color in
-            let nsColor = NSColor(color).usingColorSpace(.sRGB) ?? .black
-            return (UInt8(nsColor.redComponent * 255),
-                    UInt8(nsColor.greenComponent * 255),
-                    UInt8(nsColor.blueComponent * 255))
-        }
     }
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0/30.0)) { context in
-            let time = context.date.timeIntervalSinceReferenceDate
-            let pointW = CGFloat(width) * scale
-            let pointH = CGFloat(height) * scale
-            if let cg = renderVisualizer(time: time) {
-                let ns = NSImage(cgImage: cg, size: NSSize(width: pointW, height: pointH))
-                Image(nsImage: ns)
-                    .interpolation(.none)
-                    .frame(width: pointW, height: pointH)
-                    .contentShape(Rectangle())
-                    .onTapGesture {
-                        let all = VisualizerMode.allCases
-                        let idx = all.firstIndex(of: mode) ?? 0
-                        mode = all[(idx + 1) % all.count]
-                    }
-                    .allowsHitTesting(handleTapCycle)
-                    .padding(.leading, CGFloat(region.x) * scale)
-                    .padding(.top, CGFloat(region.y) * scale)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        VisualizerNSViewRepresentable(
+            colors: colors, isPlaying: isPlaying, mode: mode,
+            scale: scale, sourceWidth: width, sourceHeight: height, barCount: barCount
+        )
+        .frame(width: CGFloat(width) * scale, height: CGFloat(height) * scale)
+        .contentShape(Rectangle())
+        .onTapGesture {
+            if handleTapCycle {
+                let all = VisualizerMode.allCases
+                let idx = all.firstIndex(of: mode) ?? 0
+                mode = all[(idx + 1) % all.count]
             }
         }
         .allowsHitTesting(handleTapCycle)
+        .padding(.leading, CGFloat(region.x) * scale)
+        .padding(.top, CGFloat(region.y) * scale)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
+}
 
-    private func colorAt(_ index: Int) -> (UInt8, UInt8, UInt8) {
-        guard index >= 0 && index < colorRGB.count else { return (0, 0, 0) }
-        return colorRGB[index]
-    }
+private struct VisualizerNSViewRepresentable: NSViewRepresentable {
+    let colors: [Color]
+    let colorHash: Int
+    let isPlaying: Bool
+    let mode: VisualizerMode
+    let scale: CGFloat
+    let sourceWidth: Int
+    let sourceHeight: Int
+    let barCount: Int
 
-    private func renderVisualizer(time: Double) -> CGImage? {
-        let w = width   // 76
-        let h = height  // 16
-        let backing = NSScreen.main?.backingScaleFactor ?? 2.0
-        let ps = max(1, Int(scale * backing))  // device pixels per source pixel (4 for 2x+Retina)
-        let imgW = w * ps  // 304
-        let imgH = h * ps  // 64
-        var pixels = [UInt8](repeating: 0, count: imgW * imgH * 4)
-
-        // Fill a ps×ps block at source coordinates (sx, sy) with color c
-        func fill(_ sx: Int, _ sy: Int, _ c: (UInt8, UInt8, UInt8)) {
-            let bx = sx * ps
-            let by = sy * ps
-            for dy in 0..<ps {
-                let rowOffset = ((by + dy) * imgW + bx) * 4
-                for dx in 0..<ps {
-                    let offset = rowOffset + dx * 4
-                    pixels[offset] = c.0
-                    pixels[offset+1] = c.1
-                    pixels[offset+2] = c.2
-                    pixels[offset+3] = 255
-                }
+    init(colors: [Color], isPlaying: Bool, mode: VisualizerMode,
+         scale: CGFloat, sourceWidth: Int, sourceHeight: Int, barCount: Int) {
+        self.colors = colors
+        self.isPlaying = isPlaying
+        self.mode = mode
+        self.scale = scale
+        self.sourceWidth = sourceWidth
+        self.sourceHeight = sourceHeight
+        self.barCount = barCount
+        // Stable hash from actual color component values
+        var h = 0
+        for c in colors {
+            if let cg = NSColor(c).usingColorSpace(.sRGB) {
+                h = h &* 31 &+ Int(cg.redComponent * 255) &+ Int(cg.greenComponent * 255) &* 17 &+ Int(cg.blueComponent * 255) &* 31
             }
         }
-
-        let bg = colorAt(0)
-        let grid = colorAt(1)
-
-        // Background + grid at device pixel resolution
-        for y in 0..<h {
-            for x in 0..<w {
-                fill(x, y, (x % 2 == 0 && y % 2 == 0) ? grid : bg)
-            }
-        }
-
-        // Spectrum / oscilloscope
-        if isPlaying && mode != .off {
-            switch mode {
-            case .spectrum:
-                let peakColor = colorAt(23)
-                for i in 0..<barCount {
-                    let amplitude = amplitudeForBar(i, time: time)
-                    if amplitude >= peakState.values[i] {
-                        peakState.values[i] = amplitude
-                    } else {
-                        peakState.values[i] = max(0, peakState.values[i] - 0.02)
-                    }
-                    let barHeight = Int(amplitude * Double(h))
-                    let sx = i * 4
-                    for py in 0..<barHeight {
-                        let screenY = h - 1 - py
-                        let scaledPy = h >= 16 ? (py & ~1) : Int(Double(py) / Double(h - 1) * 16) & ~1
-                        let c = colorAt(min(17, 17 - scaledPy))
-                        for dx in 0..<3 { fill(sx + dx, screenY, c) }
-                    }
-                    let peakPixel = Int(peakState.values[i] * Double(h - 1))
-                    if peakPixel > 0 {
-                        let peakY = h - 1 - peakPixel
-                        for dx in 0..<3 { fill(sx + dx, peakY, peakColor) }
-                    }
-                }
-            case .oscilloscope:
-                // Instantaneous frequency readout — each x maps to a spectrum position
-                var bandAmps = [Double](repeating: 0, count: barCount)
-                for i in 0..<barCount {
-                    bandAmps[i] = amplitudeForBar(i, time: time)
-                }
-                for x in 0..<w {
-                    // Map x to a position in the band array with linear interpolation
-                    let bandPos = Double(x) / Double(w - 1) * Double(barCount - 1)
-                    let lo = Int(bandPos)
-                    let hi = min(lo + 1, barCount - 1)
-                    let frac = bandPos - Double(lo)
-                    let amp = bandAmps[lo] * (1 - frac) + bandAmps[hi] * frac
-                    let pixelY = max(0, min(h - 1, Int(Double(h - 1) * (1 - amp))))
-                    let dist = abs(pixelY - h / 2)
-                    let maxDist = h / 2
-                    let ci: Int
-                    if maxDist <= 3 {
-                        ci = dist == 0 ? 18 : dist == 1 ? 20 : 22
-                    } else {
-                        ci = dist <= 1 ? 18 : dist <= 3 ? 19 : dist <= 5 ? 20 : dist <= 6 ? 21 : 22
-                    }
-                    fill(x, pixelY, colorAt(ci))
-                }
-            case .off: break
-            }
-        }
-
-        let colorSpace = CGColorSpace(name: CGColorSpace.sRGB)!
-        guard let provider = CGDataProvider(data: Data(pixels) as CFData) else { return nil }
-        return CGImage(
-            width: imgW, height: imgH,
-            bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: imgW * 4,
-            space: colorSpace,
-            bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipLast.rawValue),
-            provider: provider,
-            decode: nil, shouldInterpolate: false, intent: .defaultIntent
-        )
+        self.colorHash = h
     }
 
-    private func amplitudeForBar(_ i: Int, time: Double) -> Double {
-        // Map bar index to the 19 spectrum bands when using fewer bars
-        let bandIndex = barCount < Self.spectrumBands
-            ? Int(Double(i) / Double(barCount) * Double(Self.spectrumBands))
-            : i
-        guard let data = Self.spectrumData, Self.spectrumFrameCount > 0 else {
-            let freq = Double(bandIndex) / Double(Self.spectrumBands)
-            let base = (1.0 - freq * 0.5) * 0.55
-            return max(0, min(1, base + sin(time * 2.3 + Double(bandIndex) * 0.5) * 0.25))
+    func makeNSView(context: Context) -> VisualizerLayerView {
+        let view = VisualizerLayerView(frame: .zero)
+        view.colorHash = colorHash
+        view.renderer = VisualizerRenderer(colors: colors, sourceWidth: sourceWidth,
+                                            sourceHeight: sourceHeight, barCount: barCount, scale: scale)
+        view.mode = mode
+        view.isPlaying = isPlaying
+        view.updateAnimation()
+        return view
+    }
+
+    func updateNSView(_ view: VisualizerLayerView, context: Context) {
+        if view.colorHash != colorHash {
+            view.colorHash = colorHash
+            view.renderer = VisualizerRenderer(colors: colors, sourceWidth: sourceWidth,
+                                                sourceHeight: sourceHeight, barCount: barCount, scale: scale)
         }
-        let frameIndex = Int(time * 30) % Self.spectrumFrameCount
-        let offset = frameIndex * Self.spectrumBands + min(bandIndex, Self.spectrumBands - 1)
-        return Double(data[offset]) / 255.0
+        view.mode = mode
+        view.isPlaying = isPlaying
+        view.updateAnimation()
     }
 }
 
@@ -1163,8 +1393,9 @@ struct WinampTimeDisplay: View {
     }
 
     private func timeContent(at date: Date) -> some View {
-        GeometryReader { geometry in
-            if let renderedTime = renderTimeDisplay() {
+        let renderedTime = renderTimeDisplay()
+        return Group {
+            if let renderedTime {
                 let charWidth: CGFloat = 9
                 let baseOffset = CGFloat(region.x) + 9 - 12 - (charWidth + 4)
 
@@ -1180,6 +1411,7 @@ struct WinampTimeDisplay: View {
                     }
             }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
     private func formatTime(_ seconds: Int) -> String {
@@ -1348,10 +1580,14 @@ struct WinampBitmapText: View {
     @State private var scrollOffset: CGFloat = 0
     @State private var scrollTimer: Timer?
     @State private var scrollDirection: CGFloat = 1.0
+    @State private var cachedImage: NSImage?
+    @State private var cachedText: String = ""
+    @State private var cachedBitmap: NSImage?
 
     var body: some View {
-        GeometryReader { geometry in
-            if let renderedText = renderBitmapText() {
+        let renderedText = getCachedRenderedText()
+        Group {
+            if let renderedText {
                 let textWidth = renderedText.size.width
                 let regionWidth = CGFloat(region.width)
                 let needsScrolling = textWidth > regionWidth
@@ -1371,19 +1607,31 @@ struct WinampBitmapText: View {
                         startScrolling(textWidth: textWidth, regionWidth: regionWidth)
                     }
                 }
+                .onChange(of: text) {
+                    stopScrolling()
+                    if needsScrolling {
+                        startScrolling(textWidth: textWidth, regionWidth: regionWidth)
+                    }
+                }
                 .onDisappear {
                     stopScrolling()
                 }
-            } else {
-                Text("TEXT NIL")
-                    .foregroundColor(.red)
-                    .font(.system(size: 8))
-                    .offset(x: CGFloat(region.x), y: CGFloat(region.y))
-                    .onAppear {
-                        print("❌ renderBitmapText returned nil for text: '\(text)'")
-                    }
             }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    private func getCachedRenderedText() -> NSImage? {
+        if text == cachedText && bitmap === cachedBitmap, let cached = cachedImage {
+            return cached
+        }
+        let rendered = renderBitmapText()
+        DispatchQueue.main.async {
+            cachedText = text
+            cachedBitmap = bitmap
+            cachedImage = rendered
+        }
+        return rendered
     }
 
     private func startScrolling(textWidth: CGFloat, regionWidth: CGFloat) {
@@ -1408,28 +1656,28 @@ struct WinampBitmapText: View {
         scrollTimer?.invalidate()
         scrollTimer = nil
     }
-    
+
     private func renderBitmapText() -> NSImage? {
         guard let cgImage = bitmap.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
             return nil
         }
-        
+
         let charWidth: CGFloat = 5
         let charHeight: CGFloat = 6
         let spacing: CGFloat = 1
-        
+
         let upperText = text.uppercased()
         let totalWidth = CGFloat(upperText.count) * (charWidth + spacing)
-        
+
         let renderedImage = NSImage(size: NSSize(width: totalWidth, height: charHeight))
-        
+
         renderedImage.lockFocus()
         NSGraphicsContext.current?.imageInterpolation = .none
 
         var xOffset: CGFloat = 0
-        
+
         for char in upperText {
-            if let charImage = extractCharacter(char, charWidth: charWidth, charHeight: charHeight) {
+            if let charImage = extractCharacter(char, from: cgImage, charWidth: charWidth, charHeight: charHeight) {
                 charImage.draw(at: NSPoint(x: xOffset, y: 0),
                               from: NSRect(origin: .zero, size: charImage.size),
                               operation: .copy,
@@ -1437,54 +1685,46 @@ struct WinampBitmapText: View {
             }
             xOffset += charWidth + spacing
         }
-        
+
         renderedImage.unlockFocus()
-        
+
         return renderedImage
     }
-    
-    private func extractCharacter(_ char: Character, charWidth: CGFloat, charHeight: CGFloat) -> NSImage? {
-        guard let cgImage = bitmap.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
-            return nil
-        }
-        
-        let bitmapHeight = CGFloat(cgImage.height)
-        
+
+    private func extractCharacter(_ char: Character, from cgImage: CGImage, charWidth: CGFloat, charHeight: CGFloat) -> NSImage? {
         let row0 = "ABCDEFGHIJKLMNOPQRSTUVWXYZ\"@   "
         let row1 = "0123456789 .:()-\'!_+\\/[]^&%,=$#"
         let row2 = "  ?*                            "
-        
+
         let charMaps = [row0, row1, row2]
-        
+
         // Handle space - return blank
         if char == " " {
             return NSImage(size: NSSize(width: charWidth, height: charHeight))
         }
-        
+
         // Find character in the map
         for (rowIndex, charMap) in charMaps.enumerated() {
             if let index = charMap.firstIndex(of: char) {
                 let col = charMap.distance(from: charMap.startIndex, to: index)
-                
-                // For text.bmp, row 0 starts at y=0 (top), not bottom
-                // Standard Winamp text.bmp is 155x18 (31 chars x 3 rows)
+
                 let yPosition = CGFloat(rowIndex) * charHeight
-                
+
                 let sourceRect = CGRect(
                     x: CGFloat(col) * charWidth,
                     y: yPosition,
                     width: charWidth,
                     height: charHeight
                 )
-                
+
                 guard let croppedCGImage = cgImage.cropping(to: sourceRect) else {
                     return nil
                 }
-                
+
                 return NSImage(cgImage: croppedCGImage, size: NSSize(width: charWidth, height: charHeight))
             }
         }
-        
+
         // Unknown character - return blank
         return NSImage(size: NSSize(width: charWidth, height: charHeight))
     }
@@ -1498,9 +1738,14 @@ struct WinampInfoDisplay: View {
     let region: WinampSkin.ButtonRegion
     @Environment(\.winampScale) private var scale
 
+    @State private var cachedImage: NSImage?
+    @State private var cachedText: String = ""
+    @State private var cachedBitmap: NSImage?
+
     var body: some View {
-        GeometryReader { geometry in
-            if let rendered = renderText() {
+        let rendered = getCachedRenderedText()
+        Group {
+            if let rendered {
                 Image(nsImage: rendered)
                     .resizable()
                     .interpolation(.none)
@@ -1508,7 +1753,20 @@ struct WinampInfoDisplay: View {
                     .offset(x: CGFloat(region.x) * scale, y: CGFloat(region.y) * scale)
             }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    private func getCachedRenderedText() -> NSImage? {
+        if text == cachedText && bitmap === cachedBitmap, let cached = cachedImage {
+            return cached
+        }
+        let rendered = renderText()
+        DispatchQueue.main.async {
+            cachedText = text
+            cachedBitmap = bitmap
+            cachedImage = rendered
+        }
+        return rendered
     }
 
     private func renderText() -> NSImage? {

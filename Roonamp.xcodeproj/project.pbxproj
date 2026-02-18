@@ -7,33 +7,28 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		1765F9C72F3E06C40063B87C /* server.js in Resources */ = {isa = PBXBuildFile; fileRef = 1765F9C62F3E06C40063B87C /* server.js */; };
-		1765F9C92F3E06F60063B87C /* package.json in Resources */ = {isa = PBXBuildFile; fileRef = 1765F9C82F3E06F60063B87C /* package.json */; };
-		1765F9D02F3E1FEF0063B87C /* base-2.91.wsz in Resources */ = {isa = PBXBuildFile; fileRef = 1765F9CF2F3E1FEF0063B87C /* base-2.91.wsz */; };
-		1765F9D22F3E20DA0063B87C /* WinampSkin.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1765F9D12F3E20DA0063B87C /* WinampSkin.swift */; };
-		1765F9D42F3E20E80063B87C /* WinampSkinParser.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1765F9D32F3E20E80063B87C /* WinampSkinParser.swift */; };
-		1765F9D62F3E21020063B87C /* WinampSkinView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1765F9D52F3E21020063B87C /* WinampSkinView.swift */; };
-		1765F9D82F3E210D0063B87C /* WinampSkinManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1765F9D72F3E210D0063B87C /* WinampSkinManager.swift */; };
-		1765F9DA2F3E30000063B87C /* spectrum_data.bin in Resources */ = {isa = PBXBuildFile; fileRef = 1765F9D92F3E30000063B87C /* spectrum_data.bin */; };
-		1765F9DC2F42A0000063B87C /* WinampPlaylistView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1765F9DB2F42A0000063B87C /* WinampPlaylistView.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
-		1765F9C62F3E06C40063B87C /* server.js */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.javascript; path = server.js; sourceTree = "<group>"; };
-		1765F9C82F3E06F60063B87C /* package.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = package.json; sourceTree = "<group>"; };
-		1765F9CF2F3E1FEF0063B87C /* base-2.91.wsz */ = {isa = PBXFileReference; lastKnownFileType = file; path = "base-2.91.wsz"; sourceTree = "<group>"; };
-		1765F9D12F3E20DA0063B87C /* WinampSkin.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WinampSkin.swift; sourceTree = "<group>"; };
-		1765F9D32F3E20E80063B87C /* WinampSkinParser.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WinampSkinParser.swift; sourceTree = "<group>"; };
-		1765F9D52F3E21020063B87C /* WinampSkinView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WinampSkinView.swift; sourceTree = "<group>"; };
-		1765F9D72F3E210D0063B87C /* WinampSkinManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WinampSkinManager.swift; sourceTree = "<group>"; };
-		1765F9D92F3E30000063B87C /* spectrum_data.bin */ = {isa = PBXFileReference; lastKnownFileType = file; path = spectrum_data.bin; sourceTree = "<group>"; };
-		1765F9DB2F42A0000063B87C /* WinampPlaylistView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WinampPlaylistView.swift; sourceTree = "<group>"; };
 		17EDB18A2F3DD08000703480 /* Roonamp.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Roonamp.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
+
+/* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
+		17EDB19F2F3DD08200703480 /* Exceptions for "Roonamp" folder in "Roonamp" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Info.plist,
+			);
+			target = 17EDB1892F3DD08000703480 /* Roonamp */;
+		};
+/* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		17EDB18C2F3DD08000703480 /* Roonamp */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				17EDB19F2F3DD08200703480 /* Exceptions for "Roonamp" folder in "Roonamp" target */,
+			);
 			path = Roonamp;
 			sourceTree = "<group>";
 		};
@@ -55,15 +50,6 @@
 			children = (
 				17EDB18C2F3DD08000703480 /* Roonamp */,
 				17EDB18B2F3DD08000703480 /* Products */,
-				1765F9C62F3E06C40063B87C /* server.js */,
-				1765F9C82F3E06F60063B87C /* package.json */,
-				1765F9CF2F3E1FEF0063B87C /* base-2.91.wsz */,
-				1765F9D12F3E20DA0063B87C /* WinampSkin.swift */,
-				1765F9D32F3E20E80063B87C /* WinampSkinParser.swift */,
-				1765F9D52F3E21020063B87C /* WinampSkinView.swift */,
-				1765F9D72F3E210D0063B87C /* WinampSkinManager.swift */,
-				1765F9DB2F42A0000063B87C /* WinampPlaylistView.swift */,
-				1765F9D92F3E30000063B87C /* spectrum_data.bin */,
 			);
 			sourceTree = "<group>";
 		};
@@ -141,10 +127,6 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				1765F9D02F3E1FEF0063B87C /* base-2.91.wsz in Resources */,
-				1765F9C72F3E06C40063B87C /* server.js in Resources */,
-				1765F9C92F3E06F60063B87C /* package.json in Resources */,
-				1765F9DA2F3E30000063B87C /* spectrum_data.bin in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -155,11 +137,6 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				1765F9D42F3E20E80063B87C /* WinampSkinParser.swift in Sources */,
-				1765F9D82F3E210D0063B87C /* WinampSkinManager.swift in Sources */,
-				1765F9D62F3E21020063B87C /* WinampSkinView.swift in Sources */,
-				1765F9D22F3E20DA0063B87C /* WinampSkin.swift in Sources */,
-				1765F9DC2F42A0000063B87C /* WinampPlaylistView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -306,6 +283,7 @@
 				ENABLE_RESOURCE_ACCESS_USB = NO;
 				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = Roonamp/Info.plist;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -346,6 +324,7 @@
 				ENABLE_RESOURCE_ACCESS_USB = NO;
 				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = Roonamp/Info.plist;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
