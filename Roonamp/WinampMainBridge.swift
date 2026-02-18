@@ -257,6 +257,9 @@ struct WinampMainNSViewRepresentable: NSViewRepresentable {
                                   mode: visualizerMode)
         }
 
+        // Window active state
+        view.updateWindowActive(isWindowActive)
+
         // Re-wire callbacks (closures may capture new values)
         wireCallbacks(view, context: context)
     }

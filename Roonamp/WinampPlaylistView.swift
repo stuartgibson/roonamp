@@ -1484,15 +1484,16 @@ struct PlaylistWindowAccessor: NSViewRepresentable {
                 window.delegate = context.coordinator
                 context.coordinator.window = window
 
-                // Track active state
+                // Track app active state for titlebar (not key window,
+                // since the playlist is often a child window)
                 NotificationCenter.default.addObserver(
-                    forName: NSWindow.didBecomeKeyNotification,
-                    object: window,
+                    forName: NSApplication.didBecomeActiveNotification,
+                    object: nil,
                     queue: .main
                 ) { _ in isWindowActive = true }
                 NotificationCenter.default.addObserver(
-                    forName: NSWindow.didResignKeyNotification,
-                    object: window,
+                    forName: NSApplication.didResignActiveNotification,
+                    object: nil,
                     queue: .main
                 ) { _ in isWindowActive = false }
 
