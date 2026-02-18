@@ -410,6 +410,16 @@ struct WinampMainNSViewRepresentable: NSViewRepresentable {
                     view?.updateAlwaysOnTop(onTop)
                 }
                 .store(in: &cancellables)
+
+            // Album art window closed via traffic light button
+            NotificationCenter.default.publisher(for: .albumArtVisibilityChanged)
+                .receive(on: DispatchQueue.main)
+                .sink { notification in
+                    if let visible = notification.object as? Bool {
+                        roonAPI.isAlbumArtVisible = visible
+                    }
+                }
+                .store(in: &cancellables)
         }
 
         func cancelSubscriptions() {

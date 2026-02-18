@@ -102,6 +102,7 @@ struct RoonampApp: App {
                 .keyboardShortcut("1", modifiers: .command)
 
                 Button("Show Album Art") {
+                    roonAPI.isAlbumArtVisible = true
                     openWindow(id: "album-art", value: true)
                 }
                 .keyboardShortcut("2", modifiers: .command)
@@ -150,7 +151,7 @@ struct RoonampApp: App {
                 }
         }
         .windowStyle(.hiddenTitleBar)
-        .windowResizability(.contentSize)
+        .windowResizability(.contentMinSize)
         .defaultSize(width: 400, height: 400)
 
         WindowGroup("Playlist", id: "playlist", for: Bool.self) { $isShowing in

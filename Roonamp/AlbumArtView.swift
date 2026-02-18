@@ -177,6 +177,16 @@ class AlbumArtWindowDelegate: NSObject, NSWindowDelegate {
         let side = max(frameSize.width, minDimension)
         return NSSize(width: side, height: side)
     }
+
+    func windowDidEndLiveResize(_ notification: Notification) {
+        guard let window = notification.object as? NSWindow else { return }
+        UserDefaults.standard.set(window.frame.width, forKey: "albumArtWidth")
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        UserDefaults.standard.set(false, forKey: "isAlbumArtVisible")
+        NotificationCenter.default.post(name: .albumArtVisibilityChanged, object: false)
+    }
 }
 
 /// NSView that provides resize cursors at the edges of a borderless window
@@ -239,6 +249,12 @@ struct AlbumArtWindowAccessor: NSViewRepresentable {
                 window.aspectRatio = NSSize(width: 1, height: 1)
                 window.minSize = NSSize(width: 200, height: 200)
                 window.delegate = context.coordinator
+
+                // Restore saved size (default 400×400)
+                let savedWidth = UserDefaults.standard.double(forKey: "albumArtWidth")
+                let side = savedWidth >= 200 ? savedWidth : 400
+                let origin = window.frame.origin
+                window.setFrame(NSRect(x: origin.x, y: origin.y, width: side, height: side), display: true)
 
                 let alwaysOnTop = UserDefaults.standard.bool(forKey: "alwaysOnTop")
                 window.level = alwaysOnTop ? .floating : .normal
