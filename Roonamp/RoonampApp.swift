@@ -139,7 +139,6 @@ struct RoonampApp: App {
 
         WindowGroup("Album Art", id: "album-art", for: Bool.self) { $isShowing in
             AlbumArtView()
-                .environmentObject(roonAPI)
                 .environmentObject(roonAPI.playback)
                 .onAppear {
                     showAlbumArt = true

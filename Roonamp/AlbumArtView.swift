@@ -8,12 +8,10 @@
 import SwiftUI
 
 struct AlbumArtView: View {
-    @EnvironmentObject var roonAPI: RoonAPI
     @EnvironmentObject var playback: PlaybackState
     @State private var isHovering = false
     @AppStorage("albumArtShowTrackInfo") private var showTrackInfo = true
     @State private var refreshID = UUID()
-    @Environment(\.dismiss) private var dismiss
     
     var body: some View {
         ZStack(alignment: .topLeading) {
@@ -95,49 +93,9 @@ struct AlbumArtView: View {
                 .animation(.easeInOut(duration: 0.2), value: showTrackInfo)
             }
 
-            // Transport Controls Overlay (center) — only in view tree when hovering
-            // to avoid expensive .glassEffect() evaluation every frame
+            // Traffic lights overlay (hover only)
             if isHovering {
-                HStack(spacing: 20) {
-                    Button {
-                        if let zoneId = playback.zoneId {
-                            Task { await roonAPI.previous(zoneId: zoneId) }
-                        }
-                    } label: {
-                        Image(systemName: "backward.fill")
-                            .font(.system(size: 24))
-                    }
-                    .buttonStyle(.plain)
-
-                    Button {
-                        if let zoneId = playback.zoneId {
-                            Task { await roonAPI.playPause(zoneId: zoneId) }
-                        }
-                    } label: {
-                        Image(systemName: playback.state == .playing ? "pause.fill" : "play.fill")
-                            .font(.system(size: 32))
-                    }
-                    .buttonStyle(.plain)
-
-                    Button {
-                        if let zoneId = playback.zoneId {
-                            Task { await roonAPI.next(zoneId: zoneId) }
-                        }
-                    } label: {
-                        Image(systemName: "forward.fill")
-                            .font(.system(size: 24))
-                    }
-                    .buttonStyle(.plain)
-                }
-                .foregroundStyle(.white)
-                .padding(16)
-                .glassEffect(.regular.interactive(), in: .capsule)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .transition(.opacity)
-
-                // Custom Traffic Lights Overlay
                 HStack(spacing: 8) {
-                    // Close button
                     Button {
                         #if os(macOS)
                         NSApp.windows.first(where: { $0.title == "Album Art" })?.close()
@@ -154,7 +112,6 @@ struct AlbumArtView: View {
                     }
                     .buttonStyle(.plain)
 
-                    // Minimize button
                     Button {
                         #if os(macOS)
                         NSApp.windows.first(where: { $0.title == "Album Art" })?.miniaturize(nil)
@@ -171,7 +128,6 @@ struct AlbumArtView: View {
                     }
                     .buttonStyle(.plain)
 
-                    // Zoom button
                     Button {
                         #if os(macOS)
                         NSApp.windows.first(where: { $0.title == "Album Art" })?.zoom(nil)
@@ -316,7 +272,6 @@ struct AlbumArtWindowAccessor: NSViewRepresentable {
         )
     )
     AlbumArtView()
-        .environmentObject(api)
         .environmentObject(api.playback)
         .frame(width: 400, height: 400)
 }
