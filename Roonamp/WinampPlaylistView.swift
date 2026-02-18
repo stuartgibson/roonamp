@@ -116,8 +116,15 @@ struct WinampPlaylistView: View {
 
     @ViewBuilder
     private var playlistTitleBar: some View {
-        if let bitmap = skin.playlistBitmap,
-           let titleImage = composeTitleBar(bitmap: bitmap, isActive: isWindowActive, width: playlistSize.width) {
+        if let bitmap = skin.playlistBitmap {
+            let key = "\(isWindowActive)-\(Int(playlistSize.width))"
+            let titleImage: NSImage? = {
+                if key == cachedTitleBarKey, let cached = cachedTitleBar { return cached }
+                let img = composeTitleBar(bitmap: bitmap, isActive: isWindowActive, width: playlistSize.width)
+                DispatchQueue.main.async { cachedTitleBarKey = key; cachedTitleBar = img }
+                return img
+            }()
+            if let titleImage {
             ZStack(alignment: .topLeading) {
                 Image(nsImage: titleImage)
                     .resizable()
@@ -154,18 +161,45 @@ struct WinampPlaylistView: View {
                 .padding(.leading, (playlistSize.width - 11) * scale)
                 .padding(.top, 3 * scale)
             }
+            }
         }
     }
+
+    // Shade view caches
+    @State private var cachedShadeBar: NSImage?
+    @State private var cachedShadeBarKey: String = ""
+    @State private var cachedShadeTitle: NSImage?
+    @State private var cachedShadeTitleKey: String = ""
+    @State private var cachedShadeTime: NSImage?
+    @State private var cachedShadeTimeKey: String = ""
+
+    // Titlebar / bottom bar caches
+    @State private var cachedTitleBar: NSImage?
+    @State private var cachedTitleBarKey: String = ""
+    @State private var cachedBottomBar: NSImage?
+    @State private var cachedBottomBarKey: String = ""
+
+    // Time display caches
+    @State private var cachedRunningTime: NSImage?
+    @State private var cachedRunningTimeKey: String = ""
+    @State private var cachedMiniTime: NSImage?
+    @State private var cachedMiniTimeKey: String = ""
 
     // MARK: - Playlist Shade View
 
     @ViewBuilder
     private var playlistShadeView: some View {
-        if let bitmap = skin.playlistBitmap,
-           let shadeImage = composeShadeBar(bitmap: bitmap, isActive: isWindowActive, width: playlistSize.width) {
+        if let bitmap = skin.playlistBitmap {
             let shadeH = CGFloat(WinampSkin.playlistShadeHeight)
             let totalW = playlistSize.width
-
+            let barKey = "\(isWindowActive)-\(Int(totalW))"
+            let shadeImage: NSImage? = {
+                if barKey == cachedShadeBarKey, let cached = cachedShadeBar { return cached }
+                let img = composeShadeBar(bitmap: bitmap, isActive: isWindowActive, width: totalW)
+                DispatchQueue.main.async { cachedShadeBarKey = barKey; cachedShadeBar = img }
+                return img
+            }()
+            if let shadeImage {
             ZStack(alignment: .topLeading) {
                 // Background bar
                 Image(nsImage: shadeImage)
@@ -178,32 +212,46 @@ struct WinampPlaylistView: View {
 
                 // Track title text (left side)
                 if let textBitmap = skin.textBitmap {
-                    let rightReserved: CGFloat = 30  // space from right edge for time + buttons
+                    let rightReserved: CGFloat = 30
                     let leftPad: CGFloat = 5
                     let timeCharW: CGFloat = 5
                     let timeText = shadeTimeText()
                     let timeWidth = CGFloat(timeText.count) * timeCharW
                     let availableW = totalW - leftPad - timeWidth - rightReserved
 
-                    // Track title
                     let titleText = shadeTitleText()
                     let maxChars = Int(availableW / 5)
                     let truncatedTitle = String(titleText.prefix(maxChars))
 
-                    if !truncatedTitle.isEmpty,
-                       let rendered = renderBitmapText(truncatedTitle, from: textBitmap) {
-                        let renderW = CGFloat(truncatedTitle.count) * 5
-                        Image(nsImage: rendered)
-                            .resizable()
-                            .interpolation(.none)
-                            .frame(width: renderW * scale, height: 6 * scale)
-                            .padding(.leading, leftPad * scale)
-                            .padding(.top, 4 * scale)
-                            .allowsHitTesting(false)
+                    if !truncatedTitle.isEmpty {
+                        let titleKey = truncatedTitle
+                        let rendered: NSImage? = {
+                            if titleKey == cachedShadeTitleKey, let cached = cachedShadeTitle { return cached }
+                            let img = renderBitmapText(truncatedTitle, from: textBitmap)
+                            DispatchQueue.main.async { cachedShadeTitleKey = titleKey; cachedShadeTitle = img }
+                            return img
+                        }()
+                        if let rendered {
+                            let renderW = CGFloat(truncatedTitle.count) * 5
+                            Image(nsImage: rendered)
+                                .resizable()
+                                .interpolation(.none)
+                                .frame(width: renderW * scale, height: 6 * scale)
+                                .padding(.leading, leftPad * scale)
+                                .padding(.top, 4 * scale)
+                                .allowsHitTesting(false)
+                        }
                     }
 
                     // Time display (before right sprite area)
-                    if let timeRendered = renderBitmapText(timeText, from: textBitmap) {
+                    let timeKey = timeText
+                    let timeRendered: NSImage? = {
+                        if timeKey == cachedShadeTimeKey, let cached = cachedShadeTime { return cached }
+                        let img = renderBitmapText(timeText, from: textBitmap)
+                        DispatchQueue.main.async { cachedShadeTimeKey = timeKey; cachedShadeTime = img }
+                        return img
+                    }()
+                    if let timeRendered {
                         Image(nsImage: timeRendered)
                             .resizable()
                             .interpolation(.none)
@@ -238,6 +286,7 @@ struct WinampPlaylistView: View {
                 .buttonStyle(.plain)
                 .padding(.leading, (totalW - 11) * scale)
                 .padding(.top, 3 * scale)
+            }
             }
         }
     }
@@ -354,13 +403,21 @@ struct WinampPlaylistView: View {
 
     @ViewBuilder
     private var playlistBottomBar: some View {
-        if let bitmap = skin.playlistBitmap,
-           let bottomImage = composeBottomBar(bitmap: bitmap, width: playlistSize.width) {
-            Image(nsImage: bottomImage)
-                .resizable()
-                .interpolation(.none)
-                .frame(width: playlistSize.width * scale, height: CGFloat(WinampSkin.playlistBottomHeight) * scale)
-                .padding(.top, (playlistSize.height - CGFloat(WinampSkin.playlistBottomHeight)) * scale)
+        if let bitmap = skin.playlistBitmap {
+            let key = "\(Int(playlistSize.width))"
+            let bottomImage: NSImage? = {
+                if key == cachedBottomBarKey, let cached = cachedBottomBar { return cached }
+                let img = composeBottomBar(bitmap: bitmap, width: playlistSize.width)
+                DispatchQueue.main.async { cachedBottomBarKey = key; cachedBottomBar = img }
+                return img
+            }()
+            if let bottomImage {
+                Image(nsImage: bottomImage)
+                    .resizable()
+                    .interpolation(.none)
+                    .frame(width: playlistSize.width * scale, height: CGFloat(WinampSkin.playlistBottomHeight) * scale)
+                    .padding(.top, (playlistSize.height - CGFloat(WinampSkin.playlistBottomHeight)) * scale)
+            }
         }
     }
 
@@ -607,12 +664,17 @@ struct WinampPlaylistView: View {
             let totalLength = roonAPI.queueItems.reduce(0) { $0 + ($1.length ?? 0) }
 
             let infoStr = formatDuration(trackLength) + "/" + formatDuration(totalLength)
-            // Right-pad to 18 chars
             let padded = infoStr.padding(toLength: 18, withPad: " ", startingAt: 0)
             let charWidth: CGFloat = 5
             let textWidth = CGFloat(padded.count) * charWidth
 
-            if let rendered = renderBitmapText(padded, from: textBitmap) {
+            let rendered: NSImage? = {
+                if padded == cachedRunningTimeKey, let cached = cachedRunningTime { return cached }
+                let img = renderBitmapText(padded, from: textBitmap)
+                DispatchQueue.main.async { cachedRunningTimeKey = padded; cachedRunningTime = img }
+                return img
+            }()
+            if let rendered {
                 Image(nsImage: rendered)
                     .resizable()
                     .interpolation(.none)
@@ -646,7 +708,13 @@ struct WinampPlaylistView: View {
             let charWidth: CGFloat = 5
             let textWidth = CGFloat(timeText.count) * charWidth
 
-            if let rendered = renderBitmapText(timeText, from: textBitmap) {
+            let rendered: NSImage? = {
+                if timeText == cachedMiniTimeKey, let cached = cachedMiniTime { return cached }
+                let img = renderBitmapText(timeText, from: textBitmap)
+                DispatchQueue.main.async { cachedMiniTimeKey = timeText; cachedMiniTime = img }
+                return img
+            }()
+            if let rendered {
                 Image(nsImage: rendered)
                     .resizable()
                     .interpolation(.none)

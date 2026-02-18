@@ -1078,10 +1078,24 @@ struct WinampTitleBar: View {
         region: WinampSkin.titleBarCloseButton,
         normalX: 18, normalY: 0, pressedX: 18, pressedY: 9)
 
+    @State private var cachedTitleBg: NSImage?
+    @State private var cachedTitleActive: Bool?
+    @State private var cachedTitleBitmap: NSImage?
+
     var body: some View {
-        GeometryReader { _ in
+        ZStack(alignment: .topLeading) {
             // Title bar background
-            if let bgImage = extractBackground() {
+            let bgImage: NSImage? = {
+                if isActive == cachedTitleActive && bitmap === cachedTitleBitmap, let cached = cachedTitleBg { return cached }
+                let img = extractBackground()
+                DispatchQueue.main.async {
+                    cachedTitleActive = isActive
+                    cachedTitleBitmap = bitmap
+                    cachedTitleBg = img
+                }
+                return img
+            }()
+            if let bgImage {
                 Image(nsImage: bgImage)
                     .resizable()
                     .interpolation(.none)
@@ -1114,7 +1128,7 @@ struct WinampTitleBar: View {
                 onClose?()
             }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
     private func extractBackground() -> NSImage? {
@@ -1194,10 +1208,26 @@ struct WinampClutterBar: View {
         ClutterButton(yOffset: 33, height: 7, spriteX: 336, spriteY: 77),  // V
     ]
 
+    @State private var cachedClutterImage: NSImage?
+    @State private var cachedClutterKey: Int = -1
+
+    private var clutterKey: Int {
+        (isAlwaysOnTop ? 1 : 0) | (isInfoOpen ? 2 : 0) | (isScaled ? 4 : 0)
+    }
+
     var body: some View {
-        GeometryReader { _ in
-            // Visual overlay at x=10
-            if let rendered = renderClutterBar() {
+        Group {
+            let key = clutterKey
+            let rendered: NSImage? = {
+                if key == cachedClutterKey, let cached = cachedClutterImage { return cached }
+                let img = renderClutterBar()
+                DispatchQueue.main.async {
+                    cachedClutterKey = key
+                    cachedClutterImage = img
+                }
+                return img
+            }()
+            if let rendered {
                 Image(nsImage: rendered)
                     .resizable()
                     .interpolation(.none)
@@ -1205,7 +1235,7 @@ struct WinampClutterBar: View {
                     .offset(x: CGFloat(region.x) * scale, y: CGFloat(region.y) * scale)
             }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .overlay(alignment: .topLeading) {
             // Hit area at x=13 (3px right of image to match main.bmp letter positions)
             Color.clear
@@ -1280,16 +1310,21 @@ struct WinampWorkLED: View {
     let redRegion: WinampSkin.ButtonRegion
     @Environment(\.winampScale) private var scale
 
+    @State private var cachedGreenLED: NSImage?
+    @State private var cachedRedLED: NSImage?
+    @State private var cachedLEDPlaying: Bool?
+
     var body: some View {
-        GeometryReader { _ in
-            if let greenSprite = extractLED(spriteY: 0) {
+        let _ = updateLEDCache()
+        Group {
+            if let greenSprite = cachedGreenLED {
                 Image(nsImage: greenSprite)
                     .resizable()
                     .interpolation(.none)
                     .frame(width: CGFloat(greenRegion.width) * scale, height: CGFloat(greenRegion.height) * scale)
                     .offset(x: CGFloat(greenRegion.x) * scale, y: CGFloat(greenRegion.y) * scale)
             }
-            if let redSprite = extractLED(spriteY: 6) {
+            if let redSprite = cachedRedLED {
                 Image(nsImage: redSprite)
                     .resizable()
                     .interpolation(.none)
@@ -1297,7 +1332,16 @@ struct WinampWorkLED: View {
                     .offset(x: CGFloat(redRegion.x) * scale, y: CGFloat(redRegion.y) * scale)
             }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    private func updateLEDCache() {
+        if cachedLEDPlaying == isPlaying { return }
+        DispatchQueue.main.async {
+            cachedLEDPlaying = isPlaying
+            cachedGreenLED = extractLED(spriteY: 0)
+            cachedRedLED = extractLED(spriteY: 6)
+        }
     }
 
     private func extractLED(spriteY: CGFloat) -> NSImage? {
@@ -1320,9 +1364,21 @@ struct WinampPlayPausIndicator: View {
     let region: WinampSkin.ButtonRegion
     @Environment(\.winampScale) private var scale
 
+    @State private var cachedSprite: NSImage?
+    @State private var cachedState: RoonZone.PlaybackState?
+
     var body: some View {
-        GeometryReader { geometry in
-            if let sprite = extractSprite() {
+        let sprite: NSImage? = {
+            if state == cachedState, let cached = cachedSprite { return cached }
+            let img = extractSprite()
+            DispatchQueue.main.async {
+                cachedState = state
+                cachedSprite = img
+            }
+            return img
+        }()
+        Group {
+            if let sprite {
                 Image(nsImage: sprite)
                     .resizable()
                     .interpolation(.none)
@@ -1330,7 +1386,7 @@ struct WinampPlayPausIndicator: View {
                     .offset(x: CGFloat(region.x) * scale, y: CGFloat(region.y) * scale)
             }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
     private func extractSprite() -> NSImage? {
@@ -1379,6 +1435,10 @@ struct WinampTimeDisplay: View {
     @EnvironmentObject var roonAPI: RoonAPI
     @Environment(\.winampScale) private var scale
 
+    @State private var cachedTimeImage: NSImage?
+    @State private var cachedTimeString: String = ""
+    @State private var cachedTimeBitmap: NSImage?
+
     private func blinkVisible(at date: Date) -> Bool {
         guard isPaused else { return true }
         let half = Int(date.timeIntervalSinceReferenceDate)
@@ -1392,8 +1452,22 @@ struct WinampTimeDisplay: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
+    private func getCachedTimeDisplay() -> NSImage? {
+        let timeStr = formatTime(seekPosition)
+        if timeStr == cachedTimeString && bitmap === cachedTimeBitmap, let cached = cachedTimeImage {
+            return cached
+        }
+        let rendered = renderTimeDisplay()
+        DispatchQueue.main.async {
+            cachedTimeString = timeStr
+            cachedTimeBitmap = bitmap
+            cachedTimeImage = rendered
+        }
+        return rendered
+    }
+
     private func timeContent(at date: Date) -> some View {
-        let renderedTime = renderTimeDisplay()
+        let renderedTime = getCachedTimeDisplay()
         return Group {
             if let renderedTime {
                 let charWidth: CGFloat = 9
@@ -1829,9 +1903,23 @@ struct WinampMonoStereoDisplay: View {
     let region: WinampSkin.ButtonRegion
     @Environment(\.winampScale) private var scale
 
+    @State private var cachedIndicator: NSImage?
+    @State private var cachedStereo: Bool?
+    @State private var cachedMSBitmap: NSImage?
+
     var body: some View {
-        GeometryReader { geometry in
-            if let rendered = renderIndicator() {
+        let rendered: NSImage? = {
+            if isStereo == cachedStereo && bitmap === cachedMSBitmap, let cached = cachedIndicator { return cached }
+            let img = renderIndicator()
+            DispatchQueue.main.async {
+                cachedStereo = isStereo
+                cachedMSBitmap = bitmap
+                cachedIndicator = img
+            }
+            return img
+        }()
+        Group {
+            if let rendered {
                 Image(nsImage: rendered)
                     .resizable()
                     .interpolation(.none)
@@ -1839,7 +1927,7 @@ struct WinampMonoStereoDisplay: View {
                     .offset(x: CGFloat(region.x) * scale, y: CGFloat(region.y) * scale)
             }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
     private func renderIndicator() -> NSImage? {
