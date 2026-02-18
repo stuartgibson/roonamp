@@ -71,8 +71,9 @@ final class VisualizerRenderer {
 
     let colorSpace = CGColorSpace(name: CGColorSpace.sRGB)!
 
-    // IOSurface for direct compositing — avoids per-frame color conversion in CA::Render
-    let ioSurface: IOSurface
+    // Double-buffered IOSurfaces — alternating surfaces so CALayer sees a new object each frame
+    private let surfaces: (IOSurface, IOSurface)
+    private var surfaceIndex: Bool = false
 
     init(colors: [Color], sourceWidth: Int = 76, sourceHeight: Int = 16,
          barCount: Int = 19, scale: CGFloat) {
@@ -164,7 +165,7 @@ final class VisualizerRenderer {
             pvi += 1
         }
 
-        // Create IOSurface for zero-copy compositing (avoids CA color conversion)
+        // Create double-buffered IOSurfaces for zero-copy compositing
         let props: [IOSurfacePropertyKey: Any] = [
             .width: iW,
             .height: iH,
@@ -172,7 +173,7 @@ final class VisualizerRenderer {
             .bytesPerRow: iW * 4,
             .pixelFormat: kCVPixelFormatType_32BGRA
         ]
-        self.ioSurface = IOSurface(properties: props)!
+        self.surfaces = (IOSurface(properties: props)!, IOSurface(properties: props)!)
     }
 
     deinit {
@@ -282,13 +283,14 @@ final class VisualizerRenderer {
             }
         }
 
-        // Copy frame buffer into IOSurface
-        ioSurface.lock(options: [], seed: nil)
-        let dest = ioSurface.baseAddress
-        memcpy(dest, frameBuffer, pixelCount * 4)
-        ioSurface.unlock(options: [], seed: nil)
+        // Copy frame buffer into the back IOSurface, then swap
+        surfaceIndex.toggle()
+        let surface = surfaceIndex ? surfaces.1 : surfaces.0
+        surface.lock(options: [], seed: nil)
+        memcpy(surface.baseAddress, frameBuffer, pixelCount * 4)
+        surface.unlock(options: [], seed: nil)
 
-        return ioSurface
+        return surface
     }
 
     func amplitudeForBar(_ i: Int, time: Double) -> Double {
@@ -328,8 +330,6 @@ final class VisualizerLayerView: NSView {
         renderTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 15.0, repeats: true) { [weak self] _ in
             guard let self = self, let renderer = self.renderer, let layer = self.layer else { return }
             let surface = renderer.renderFrame(time: CFAbsoluteTimeGetCurrent(), mode: self.mode, isPlaying: self.isPlaying)
-            // Same IOSurface object is reused — force CALayer to pick up new pixels
-            layer.contents = nil
             layer.contents = surface
         }
     }
