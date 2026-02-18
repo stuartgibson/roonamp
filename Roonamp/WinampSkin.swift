@@ -9,7 +9,7 @@ import Foundation
 import SwiftUI
 
 /// Playlist editor colors from pledit.txt
-struct PlaylistColors {
+struct PlaylistColors: Equatable {
     let normal: Color       // Normal text color
     let current: Color      // Currently playing text color
     let normalBG: Color     // Normal background color

@@ -77,7 +77,7 @@ struct RoonampApp: App {
         WindowGroup {
             Group {
                 if let skin = skinManager.currentSkin {
-                    WinampSkinView(skin: skin)
+                    WinampMainBridge(skin: skin)
                         .environmentObject(roonAPI)
                         .environmentObject(skinManager)
                 } else {

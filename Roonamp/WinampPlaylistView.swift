@@ -117,7 +117,8 @@ struct WinampPlaylistView: View {
     @ViewBuilder
     private var playlistTitleBar: some View {
         if let bitmap = skin.playlistBitmap {
-            let key = "\(isWindowActive)-\(Int(playlistSize.width))"
+            let skinId = "\(Unmanaged.passUnretained(bitmap).toOpaque())"
+            let key = "\(skinId)-\(isWindowActive)-\(Int(playlistSize.width))"
             let titleImage: NSImage? = {
                 if key == cachedTitleBarKey, let cached = cachedTitleBar { return cached }
                 let img = composeTitleBar(bitmap: bitmap, isActive: isWindowActive, width: playlistSize.width)
@@ -192,7 +193,8 @@ struct WinampPlaylistView: View {
         if let bitmap = skin.playlistBitmap {
             let shadeH = CGFloat(WinampSkin.playlistShadeHeight)
             let totalW = playlistSize.width
-            let barKey = "\(isWindowActive)-\(Int(totalW))"
+            let skinId = "\(Unmanaged.passUnretained(bitmap).toOpaque())"
+            let barKey = "\(skinId)-\(isWindowActive)-\(Int(totalW))"
             let shadeImage: NSImage? = {
                 if barKey == cachedShadeBarKey, let cached = cachedShadeBar { return cached }
                 let img = composeShadeBar(bitmap: bitmap, isActive: isWindowActive, width: totalW)
@@ -212,6 +214,7 @@ struct WinampPlaylistView: View {
 
                 // Track title text (left side)
                 if let textBitmap = skin.textBitmap {
+                    let textSkinId = "\(Unmanaged.passUnretained(textBitmap).toOpaque())"
                     let rightReserved: CGFloat = 30
                     let leftPad: CGFloat = 5
                     let timeCharW: CGFloat = 5
@@ -224,7 +227,7 @@ struct WinampPlaylistView: View {
                     let truncatedTitle = String(titleText.prefix(maxChars))
 
                     if !truncatedTitle.isEmpty {
-                        let titleKey = truncatedTitle
+                        let titleKey = "\(textSkinId)-\(truncatedTitle)"
                         let rendered: NSImage? = {
                             if titleKey == cachedShadeTitleKey, let cached = cachedShadeTitle { return cached }
                             let img = renderBitmapText(truncatedTitle, from: textBitmap)
@@ -244,7 +247,7 @@ struct WinampPlaylistView: View {
                     }
 
                     // Time display (before right sprite area)
-                    let timeKey = timeText
+                    let timeKey = "\(textSkinId)-\(timeText)"
                     let timeRendered: NSImage? = {
                         if timeKey == cachedShadeTimeKey, let cached = cachedShadeTime { return cached }
                         let img = renderBitmapText(timeText, from: textBitmap)
@@ -404,7 +407,8 @@ struct WinampPlaylistView: View {
     @ViewBuilder
     private var playlistBottomBar: some View {
         if let bitmap = skin.playlistBitmap {
-            let key = "\(Int(playlistSize.width))"
+            let skinId = "\(Unmanaged.passUnretained(bitmap).toOpaque())"
+            let key = "\(skinId)-\(Int(playlistSize.width))"
             let bottomImage: NSImage? = {
                 if key == cachedBottomBarKey, let cached = cachedBottomBar { return cached }
                 let img = composeBottomBar(bitmap: bitmap, width: playlistSize.width)
@@ -432,59 +436,14 @@ struct WinampPlaylistView: View {
 
     @ViewBuilder
     private var trackListView: some View {
-        let trackH = CGFloat(WinampSkin.playlistTrackRowHeight) * scale
-        let nowPlaying = roonAPI.currentZone?.nowPlaying
-        let items = allPlaylistItems
-
-            ScrollView(.vertical, showsIndicators: false) {
-                LazyVStack(spacing: 0) {
-                    ForEach(Array(items.enumerated()), id: \.element.item.id) { index, entry in
-                        let item = entry.item
-                        let currentQueueItemId = roonAPI.queueItems.first?.id
-                        let isCurrent = !entry.isHistory && currentQueueItemId != nil && item.id == currentQueueItemId
-                        let isSelected = item.id == selectedItemId
-                        let textColor: Color = {
-                            if isCurrent { return skin.playlistColors.current }
-                            if entry.isHistory { return skin.playlistColors.normal.opacity(0.45) }
-                            return skin.playlistColors.normal
-                        }()
-                        let bgColor = isSelected ? skin.playlistColors.selectedBG : skin.playlistColors.normalBG
-
-                        HStack(spacing: 0) {
-                            Text("\(index + 1). ")
-                                .foregroundColor(textColor)
-                                .font(.custom(skin.playlistColors.font, size: 8 * scale))
-                                .lineLimit(1)
-
-                            Text(item.artist.isEmpty ? item.title : "\(item.artist) - \(item.title)")
-                                .foregroundColor(textColor)
-                                .font(.custom(skin.playlistColors.font, size: 8 * scale))
-                                .lineLimit(1)
-                                .truncationMode(.tail)
-
-                            Spacer(minLength: 0)
-
-                            Text(item.durationString)
-                                .foregroundColor(textColor)
-                                .font(.custom(skin.playlistColors.font, size: 8 * scale))
-                                .lineLimit(1)
-                        }
-                        .frame(height: trackH)
-                        .frame(maxWidth: .infinity)
-                        .padding(.horizontal, 2 * scale)
-                        .background(bgColor)
-                        .id(item.id)
-                        .onTapGesture(count: 2) {
-                            guard let zoneId = roonAPI.currentZone?.id else { return }
-                            Task { await roonAPI.playFromHere(zoneId: zoneId, queueItemId: item.id) }
-                        }
-                        .onTapGesture(count: 1) {
-                            selectedItemId = item.id
-                        }
-                    }
-                }
-                .background(ScrollViewOffsetObserver(fraction: $scrollFractionState, scrollState: scrollState))
-            }
+        PlaylistTableView(
+            skin: skin,
+            roonAPI: roonAPI,
+            scale: scale,
+            selectedItemId: $selectedItemId,
+            scrollFraction: $scrollFractionState,
+            scrollState: scrollState
+        )
     }
 
     // MARK: - Custom Scrollbar
@@ -657,6 +616,7 @@ struct WinampPlaylistView: View {
     @ViewBuilder
     private var runningTimeDisplay: some View {
         if let textBitmap = skin.textBitmap {
+            let textSkinId = "\(Unmanaged.passUnretained(textBitmap).toOpaque())"
             let w = playlistSize.width
             let h = playlistSize.height
 
@@ -668,10 +628,11 @@ struct WinampPlaylistView: View {
             let charWidth: CGFloat = 5
             let textWidth = CGFloat(padded.count) * charWidth
 
+            let runningTimeKey = "\(textSkinId)-\(padded)"
             let rendered: NSImage? = {
-                if padded == cachedRunningTimeKey, let cached = cachedRunningTime { return cached }
+                if runningTimeKey == cachedRunningTimeKey, let cached = cachedRunningTime { return cached }
                 let img = renderBitmapText(padded, from: textBitmap)
-                DispatchQueue.main.async { cachedRunningTimeKey = padded; cachedRunningTime = img }
+                DispatchQueue.main.async { cachedRunningTimeKey = runningTimeKey; cachedRunningTime = img }
                 return img
             }()
             if let rendered {
@@ -701,6 +662,7 @@ struct WinampPlaylistView: View {
     @ViewBuilder
     private var miniTimeDisplay: some View {
         if let textBitmap = skin.textBitmap {
+            let textSkinId = "\(Unmanaged.passUnretained(textBitmap).toOpaque())"
             let w = playlistSize.width
             let h = playlistSize.height
             let seekPos = roonAPI.currentZone?.nowPlaying?.seekPosition ?? 0
@@ -708,10 +670,11 @@ struct WinampPlaylistView: View {
             let charWidth: CGFloat = 5
             let textWidth = CGFloat(timeText.count) * charWidth
 
+            let miniTimeKey = "\(textSkinId)-\(timeText)"
             let rendered: NSImage? = {
-                if timeText == cachedMiniTimeKey, let cached = cachedMiniTime { return cached }
+                if miniTimeKey == cachedMiniTimeKey, let cached = cachedMiniTime { return cached }
                 let img = renderBitmapText(timeText, from: textBitmap)
-                DispatchQueue.main.async { cachedMiniTimeKey = timeText; cachedMiniTime = img }
+                DispatchQueue.main.async { cachedMiniTimeKey = miniTimeKey; cachedMiniTime = img }
                 return img
             }()
             if let rendered {
@@ -1145,51 +1108,129 @@ class PlaylistScrollState: NSObject, ObservableObject {
     }
 }
 
-// MARK: - NSScrollView Offset Observer
+// MARK: - NSTableView-based Playlist Track List
 
-/// Finds the enclosing NSScrollView, stores a reference, and reports the scroll fraction (0...1)
-struct ScrollViewOffsetObserver: NSViewRepresentable {
-    @Binding var fraction: CGFloat
+struct PlaylistTableView: NSViewRepresentable {
+    let skin: WinampSkin
+    let roonAPI: RoonAPI
+    let scale: CGFloat
+    @Binding var selectedItemId: Int?
+    @Binding var scrollFraction: CGFloat
     let scrollState: PlaylistScrollState
 
-    func makeNSView(context: Context) -> NSView {
-        let view = NSView()
-        DispatchQueue.main.async {
-            guard let scrollView = findScrollView(in: view) else { return }
-            scrollState.scrollView = scrollView
-            let clipView = scrollView.contentView
-            clipView.postsBoundsChangedNotifications = true
-            context.coordinator.observe(scrollView: scrollView)
-        }
-        return view
-    }
-
-    func updateNSView(_ nsView: NSView, context: Context) {}
-
     func makeCoordinator() -> Coordinator {
-        Coordinator(fraction: $fraction)
+        Coordinator(parent: self)
     }
 
-    private func findScrollView(in view: NSView) -> NSScrollView? {
-        var current: NSView? = view
-        while let v = current {
-            if let sv = v as? NSScrollView { return sv }
-            current = v.superview
-        }
-        return nil
+    func makeNSView(context: Context) -> NSScrollView {
+        let scrollView = NSScrollView()
+        scrollView.hasVerticalScroller = false
+        scrollView.hasHorizontalScroller = false
+        scrollView.borderType = .noBorder
+        scrollView.drawsBackground = true
+        scrollView.backgroundColor = NSColor(skin.playlistColors.normalBG)
+        scrollView.automaticallyAdjustsContentInsets = false
+        scrollView.contentInsets = NSEdgeInsets()
+
+        let tableView = NSTableView()
+        tableView.headerView = nil
+        tableView.intercellSpacing = .zero
+        tableView.rowHeight = CGFloat(WinampSkin.playlistTrackRowHeight) * scale
+        tableView.backgroundColor = NSColor(skin.playlistColors.normalBG)
+        tableView.selectionHighlightStyle = .none
+        tableView.allowsMultipleSelection = false
+        tableView.gridStyleMask = []
+        tableView.usesAlternatingRowBackgroundColors = false
+        tableView.style = .plain
+
+        let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("track"))
+        column.isEditable = false
+        tableView.addTableColumn(column)
+
+        tableView.delegate = context.coordinator
+        tableView.dataSource = context.coordinator
+        tableView.target = context.coordinator
+        tableView.doubleAction = #selector(Coordinator.doubleClickRow(_:))
+
+        scrollView.documentView = tableView
+        context.coordinator.tableView = tableView
+
+        // Store scroll view reference for programmatic scrolling
+        scrollState.scrollView = scrollView
+
+        // Observe scroll position for fraction updates
+        let clipView = scrollView.contentView
+        clipView.postsBoundsChangedNotifications = true
+        context.coordinator.observeScroll(clipView: clipView, scrollView: scrollView)
+
+        // Subscribe to data changes
+        context.coordinator.subscribeToChanges()
+
+        return scrollView
     }
 
-    class Coordinator: NSObject {
-        var fraction: Binding<CGFloat>
-        private var observation: Any?
+    func updateNSView(_ scrollView: NSScrollView, context: Context) {
+        let coordinator = context.coordinator
+        let oldSkin = coordinator.parent.skin
+        let oldScale = coordinator.parent.scale
+        coordinator.parent = self
 
-        init(fraction: Binding<CGFloat>) {
-            self.fraction = fraction
+        // Update colors
+        scrollView.backgroundColor = NSColor(skin.playlistColors.normalBG)
+
+        if let tableView = coordinator.tableView {
+            let newRowHeight = CGFloat(WinampSkin.playlistTrackRowHeight) * scale
+            let skinChanged = skin.playlistColors != oldSkin.playlistColors
+            let scaleChanged = scale != oldScale
+
+            if scaleChanged {
+                tableView.rowHeight = newRowHeight
+            }
+            if skinChanged || scaleChanged {
+                tableView.backgroundColor = NSColor(skin.playlistColors.normalBG)
+                tableView.reloadData()
+            }
+
+            // Ensure column fills width
+            if let column = tableView.tableColumns.first {
+                column.width = scrollView.contentView.bounds.width
+            }
+        }
+    }
+
+    class Coordinator: NSObject, NSTableViewDelegate, NSTableViewDataSource {
+        var parent: PlaylistTableView
+        weak var tableView: NSTableView?
+        var items: [(item: QueueItem, isHistory: Bool)] = []
+        private var cancellables = Set<AnyCancellable>()
+        private var scrollObservation: Any?
+        private var currentTrackId: Int?
+
+        init(parent: PlaylistTableView) {
+            self.parent = parent
+            super.init()
         }
 
-        func observe(scrollView: NSScrollView) {
-            let clipView = scrollView.contentView
-            observation = NotificationCenter.default.addObserver(
+        func subscribeToChanges() {
+            let roonAPI = parent.roonAPI
+
+            // Observe queue changes
+            roonAPI.$queueItems
+                .combineLatest(roonAPI.$queueHistory)
+                .receive(on: DispatchQueue.main)
+                .sink { [weak self] queueItems, queueHistory in
+                    guard let self = self else { return }
+                    let history = queueHistory.map { (item: $0, isHistory: true) }
+                    let current = queueItems.map { (item: $0, isHistory: false) }
+                    self.items = history + current
+                    self.currentTrackId = queueItems.first?.id
+                    self.tableView?.reloadData()
+                }
+                .store(in: &cancellables)
+        }
+
+        func observeScroll(clipView: NSClipView, scrollView: NSScrollView) {
+            scrollObservation = NotificationCenter.default.addObserver(
                 forName: NSView.boundsDidChangeNotification,
                 object: clipView,
                 queue: .main
@@ -1199,16 +1240,184 @@ struct ScrollViewOffsetObserver: NSViewRepresentable {
                 let visibleH = clipView.bounds.height
                 let scrollableH = contentH - visibleH
                 guard scrollableH > 0 else {
-                    self?.fraction.wrappedValue = 0
+                    self?.parent.scrollFraction = 0
                     return
                 }
-                self?.fraction.wrappedValue = min(1, max(0, clipView.bounds.origin.y / scrollableH))
+                self?.parent.scrollFraction = min(1, max(0, clipView.bounds.origin.y / scrollableH))
+            }
+        }
+
+        // MARK: - NSTableViewDataSource
+
+        func numberOfRows(in tableView: NSTableView) -> Int {
+            items.count
+        }
+
+        // MARK: - NSTableViewDelegate
+
+        func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+            guard row < items.count else { return nil }
+            let entry = items[row]
+            let item = entry.item
+            let scale = parent.scale
+
+            let isCurrent = !entry.isHistory && item.id == currentTrackId
+            let isSelected = item.id == parent.selectedItemId
+
+            let textColor: NSColor = {
+                if isCurrent { return NSColor(parent.skin.playlistColors.current) }
+                if entry.isHistory { return NSColor(parent.skin.playlistColors.normal).withAlphaComponent(0.45) }
+                return NSColor(parent.skin.playlistColors.normal)
+            }()
+            let bgColor = isSelected
+                ? NSColor(parent.skin.playlistColors.selectedBG)
+                : NSColor(parent.skin.playlistColors.normalBG)
+
+            let font = NSFont(name: parent.skin.playlistColors.font, size: 8 * scale)
+                ?? NSFont.systemFont(ofSize: 8 * scale)
+
+            let indexText = "\(row + 1). "
+            let titleText = item.artist.isEmpty ? item.title : "\(item.artist) - \(item.title)"
+            let durationText = item.durationString
+
+            // Reuse or create cell view
+            let cellId = NSUserInterfaceItemIdentifier("PlaylistCell")
+            let cell: PlaylistCellView
+            if let reused = tableView.makeView(withIdentifier: cellId, owner: nil) as? PlaylistCellView {
+                cell = reused
+            } else {
+                cell = PlaylistCellView()
+                cell.identifier = cellId
+            }
+
+            cell.configure(
+                index: indexText,
+                title: titleText,
+                duration: durationText,
+                font: font,
+                textColor: textColor,
+                bgColor: bgColor,
+                horizontalPadding: 2 * scale
+            )
+
+            return cell
+        }
+
+        func tableViewSelectionDidChange(_ notification: Notification) {
+            guard let tableView = tableView else { return }
+            let row = tableView.selectedRow
+            if row >= 0, row < items.count {
+                parent.selectedItemId = items[row].item.id
+            }
+        }
+
+        @objc func doubleClickRow(_ sender: NSTableView) {
+            let row = sender.clickedRow
+            guard row >= 0, row < items.count else { return }
+            let item = items[row].item
+            guard let zoneId = parent.roonAPI.currentZone?.id else { return }
+            Task { @MainActor in
+                await parent.roonAPI.playFromHere(zoneId: zoneId, queueItemId: item.id)
             }
         }
 
         deinit {
-            if let observation { NotificationCenter.default.removeObserver(observation) }
+            if let obs = scrollObservation {
+                NotificationCenter.default.removeObserver(obs)
+            }
         }
+    }
+}
+
+// MARK: - Playlist Cell View
+
+private class PlaylistCellView: NSView {
+    private let indexField = NSTextField(labelWithString: "")
+    private let titleField = NSTextField(labelWithString: "")
+    private let durationField = NSTextField(labelWithString: "")
+    private var bgColor: NSColor = .clear
+    private var horizontalPadding: CGFloat = 2
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        setupFields()
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        setupFields()
+    }
+
+    private func setupFields() {
+        for field in [indexField, titleField, durationField] {
+            field.isEditable = false
+            field.isBordered = false
+            field.drawsBackground = false
+            field.lineBreakMode = .byClipping
+            field.cell?.truncatesLastVisibleLine = true
+            addSubview(field)
+        }
+        titleField.lineBreakMode = .byTruncatingTail
+        titleField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        durationField.setContentHuggingPriority(.required, for: .horizontal)
+        indexField.setContentHuggingPriority(.required, for: .horizontal)
+    }
+
+    func configure(
+        index: String,
+        title: String,
+        duration: String,
+        font: NSFont,
+        textColor: NSColor,
+        bgColor: NSColor,
+        horizontalPadding: CGFloat
+    ) {
+        self.bgColor = bgColor
+        self.horizontalPadding = horizontalPadding
+
+        indexField.stringValue = index
+        indexField.font = font
+        indexField.textColor = textColor
+
+        titleField.stringValue = title
+        titleField.font = font
+        titleField.textColor = textColor
+
+        durationField.stringValue = duration
+        durationField.font = font
+        durationField.textColor = textColor
+
+        needsLayout = true
+        needsDisplay = true
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        bgColor.setFill()
+        dirtyRect.fill()
+        super.draw(dirtyRect)
+    }
+
+    override func layout() {
+        super.layout()
+        let h = bounds.height
+        let pad = horizontalPadding
+
+        let indexSize = indexField.sizeThatFits(NSSize(width: 200, height: h))
+        let durationSize = durationField.sizeThatFits(NSSize(width: 200, height: h))
+
+        indexField.frame = NSRect(x: pad, y: 0, width: indexSize.width, height: h)
+        durationField.frame = NSRect(
+            x: bounds.width - durationSize.width - pad,
+            y: 0,
+            width: durationSize.width,
+            height: h
+        )
+        titleField.frame = NSRect(
+            x: pad + indexSize.width,
+            y: 0,
+            width: max(0, bounds.width - indexSize.width - durationSize.width - pad * 2),
+            height: h
+        )
     }
 }
 

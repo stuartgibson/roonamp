@@ -12,6 +12,8 @@ struct SettingsView: View {
     @EnvironmentObject var roonAPI: RoonAPI
     @EnvironmentObject var skinManager: WinampSkinManager
     @AppStorage("windowScale") private var windowScale: Double = 2.0
+    @AppStorage("displayKbps") private var displayKbps: String = ""
+    @AppStorage("displayKHz") private var displayKHz: String = ""
     @State private var showingSkinImporter = false
     @State private var importError: String?
     @State private var showingImportError = false
@@ -55,6 +57,18 @@ struct SettingsView: View {
                 }
             }
             
+            Section {
+                TextField("Bitrate (kbps)", text: $displayKbps)
+                    .textFieldStyle(.roundedBorder)
+                TextField("Sample rate (kHz)", text: $displayKHz)
+                    .textFieldStyle(.roundedBorder)
+            } header: {
+                Text("Info Display")
+            } footer: {
+                Text("The Roon API does not provide bitrate or sample rate information. These values are shown as static text in the main window display.")
+                    .foregroundStyle(.secondary)
+            }
+
             Section("Connection") {
                 LabeledContent("Status") {
                     HStack {
