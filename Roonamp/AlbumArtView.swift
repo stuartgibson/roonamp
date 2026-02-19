@@ -35,14 +35,10 @@ struct AlbumArtView: View {
                                 .resizable()
                                 .aspectRatio(contentMode: .fit)
                         case .failure:
-                            VStack(spacing: 8) {
-                                Image(systemName: "photo")
-                                    .font(.system(size: 40))
-                                    .foregroundStyle(.white.opacity(0.6))
-                                Text("Image unavailable")
-                                    .font(.caption)
-                                    .foregroundStyle(.white.opacity(0.6))
-                            }
+                            Image(systemName: "opticaldisc.fill")
+                                .font(.system(size: 80))
+                                .foregroundStyle(.white.opacity(0.3))
+                                .frame(maxWidth: .infinity, maxHeight: .infinity)
                         @unknown default:
                             Image(systemName: "music.note")
                                 .font(.system(size: 60))
@@ -52,15 +48,10 @@ struct AlbumArtView: View {
                 }
                 .id(refreshID)
             } else {
-                VStack(spacing: 15) {
-                    Image(systemName: "music.note")
-                        .font(.system(size: 80))
-                        .foregroundStyle(.white.opacity(0.3))
-                    
-                    Text("No Album Art")
-                        .font(.title3)
-                        .foregroundStyle(.white.opacity(0.6))
-                }
+                Image(systemName: "opticaldisc.fill")
+                    .font(.system(size: 80))
+                    .foregroundStyle(.white.opacity(0.3))
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
             
             // Track Info Overlay (bottom)

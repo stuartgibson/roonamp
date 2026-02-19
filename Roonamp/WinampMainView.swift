@@ -790,17 +790,24 @@ final class WinampMainView: NSView {
 
     func updateZone(_ zone: RoonZone?) {
         guard let zone = zone else {
-            // No zone - hide dynamic elements
+            // No zone - show idle state
             playPausIndicatorLayer.isHidden = true
             greenLEDLayer.isHidden = true
             redLEDLayer.isHidden = true
-            titleTextLayer.contents = nil
-            timeDisplayLayer.isHidden = true
             monoLayer.isHidden = true
             stereoLayer.isHidden = true
             cachedState = nil
-            cachedTitle = ""
-            cachedArtist = ""
+            cachedSeekPosition = 0
+            currentSeekPosition = 0
+            if cachedTitle != "Nothing Playing" {
+                cachedTitle = "Nothing Playing"
+                cachedArtist = ""
+                scrollOffset = 0
+                scrollDirection = 1.0
+                updateTitleText()
+            }
+            timeDisplayLayer.isHidden = false
+            updateTimeDisplay()
             stopTimers()
             return
         }
@@ -842,7 +849,7 @@ final class WinampMainView: NSView {
         }
 
         // Title
-        let newTitle = np?.title ?? ""
+        let newTitle = np?.title ?? "Nothing Playing"
         let newArtist = np?.artist ?? ""
         if newTitle != cachedTitle || newArtist != cachedArtist {
             cachedTitle = newTitle
@@ -954,7 +961,7 @@ final class WinampMainView: NSView {
             redLEDLayer.contents = sp.redLEDDim
         }
 
-        timeDisplayLayer.isHidden = state != .playing && state != .paused
+        timeDisplayLayer.isHidden = false
         blinkVisible = true
         timeDisplayLayer.opacity = 1
     }
@@ -1029,7 +1036,7 @@ final class WinampMainView: NSView {
             return
         }
 
-        let text = "\(cachedArtist) - \(cachedTitle)"
+        let text = cachedArtist.isEmpty ? cachedTitle : "\(cachedArtist) - \(cachedTitle)"
         let charWidth: CGFloat = 5
         let charHeight: CGFloat = 6
         let spacing: CGFloat = 1

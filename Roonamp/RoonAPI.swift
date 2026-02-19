@@ -558,7 +558,9 @@ class RoonAPI: ObservableObject {
     // MARK: - Transport Control
 
     func play(zoneId: String) async {
-        optimisticallyUpdateState(zoneId: zoneId, newState: .playing)
+        if currentZone?.nowPlaying != nil {
+            optimisticallyUpdateState(zoneId: zoneId, newState: .playing)
+        }
         await sendControl(zoneId: zoneId, control: "play")
     }
 
@@ -568,7 +570,7 @@ class RoonAPI: ObservableObject {
     }
 
     func playPause(zoneId: String) async {
-        if let currentState = currentZone?.state {
+        if let currentState = currentZone?.state, currentZone?.nowPlaying != nil {
             let newState: RoonZone.PlaybackState = currentState == .playing ? .paused : .playing
             optimisticallyUpdateState(zoneId: zoneId, newState: newState)
         }
