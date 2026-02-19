@@ -24,7 +24,7 @@ struct WinampPlaylistView: View {
     @AppStorage("showRemaining") private var showRemaining: Bool = false
     @AppStorage("playlistWindowShade") private var isPlaylistShade: Bool = false
     @State private var selectedItemId: Int? = nil
-    @State private var currentSeekPosition: Int = 0
+    @State private var displaySeekPosition: Int = 0
     @StateObject private var scrollState = PlaylistScrollState()
 
     private var currentHeight: CGFloat {
@@ -107,14 +107,14 @@ struct WinampPlaylistView: View {
         ))
         .onAppear {
             roonAPI.isPlaylistVisible = true
-            currentSeekPosition = playback.seekPosition
+            displaySeekPosition = playback.currentSeekPosition
             Task { await roonAPI.fetchQueue() }
         }
         .onDisappear {
             roonAPI.isPlaylistVisible = false
         }
-        .onReceive(playback.seekPositionPublisher) { newPosition in
-            currentSeekPosition = newPosition
+        .onReceive(playback.currentSeekPositionSubject) { newPosition in
+            displaySeekPosition = newPosition
         }
     }
 
@@ -671,7 +671,7 @@ struct WinampPlaylistView: View {
             let textSkinId = "\(Unmanaged.passUnretained(textBitmap).toOpaque())"
             let w = playlistSize.width
             let h = playlistSize.height
-            let seekPos = currentSeekPosition
+            let seekPos = displaySeekPosition
             let timeText = formatCompactTime(seekPos)
             let charWidth: CGFloat = 5
             let textWidth = CGFloat(timeText.count) * charWidth
@@ -684,12 +684,18 @@ struct WinampPlaylistView: View {
                 return img
             }()
             if let rendered {
-                Image(nsImage: rendered)
-                    .resizable()
-                    .interpolation(.none)
-                    .frame(width: textWidth * scale, height: 6 * scale)
-                    .padding(.leading, (w - 83) * scale)
-                    .padding(.top, (h - 15) * scale)
+                Button {
+                    showRemaining.toggle()
+                } label: {
+                    Image(nsImage: rendered)
+                        .resizable()
+                        .interpolation(.none)
+                        .frame(width: textWidth * scale, height: 6 * scale)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .padding(.leading, (w - 83) * scale)
+                .padding(.top, (h - 15) * scale)
             }
         }
     }

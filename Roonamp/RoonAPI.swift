@@ -74,11 +74,13 @@ class RoonAPI: ObservableObject {
     }
 
     private func syncPlayback() {
-        playback.state = currentZone?.state
         playback.nowPlaying = currentZone?.nowPlaying
         playback.seekPosition = currentZone?.nowPlaying?.seekPosition ?? 0
         playback.zoneId = currentZone?.id
         playback.displayName = currentZone?.displayName
+        // Set state last — it triggers interpolation timer start/stop,
+        // so seekPosition must already be set as the interpolation base.
+        playback.state = currentZone?.state
     }
 
     // MARK: - Connection Management

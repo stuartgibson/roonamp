@@ -342,9 +342,9 @@ final class WinampMainView: NSView {
     private var comboTimer: Timer?
     private var blinkTimer: Timer?
     private var blinkVisible: Bool = true
-    private var lastUpdateTime: Date = Date()
-    private var currentSeekPosition: Int = 0
-    private var localSeekPosition: Int?  // non-nil after local seek, cleared on server confirm
+
+    // Seek position — set by coordinator from PlaybackState.currentSeekPosition
+    var displaySeekPosition: Int = 0
 
     // Title scroll state
     private var scrollOffset: CGFloat = 0
@@ -798,7 +798,7 @@ final class WinampMainView: NSView {
             stereoLayer.isHidden = true
             cachedState = nil
             cachedSeekPosition = 0
-            currentSeekPosition = 0
+            displaySeekPosition = 0
             if cachedTitle != "Nothing Playing" {
                 cachedTitle = "Nothing Playing"
                 cachedArtist = ""
@@ -815,21 +815,6 @@ final class WinampMainView: NSView {
         let stateChanged = zone.state != cachedState
         let np = zone.nowPlaying
 
-        // Update seek position from server
-        if let newPos = np?.seekPosition {
-            cachedSeekPosition = newPos
-            if let localSeek = localSeekPosition {
-                if abs(newPos - localSeek) <= 3 {
-                    localSeekPosition = nil
-                    currentSeekPosition = newPos
-                    lastUpdateTime = Date()
-                }
-            } else {
-                currentSeekPosition = newPos
-                lastUpdateTime = Date()
-            }
-        }
-
         // Play state
         if stateChanged {
             cachedState = zone.state
@@ -838,7 +823,6 @@ final class WinampMainView: NSView {
             visualizerView?.isPlaying = zone.state == .playing
             visualizerView?.updateAnimation()
             if zone.state == .playing {
-                lastUpdateTime = Date()
                 startTimers()
             } else {
                 stopTimers()
@@ -908,20 +892,6 @@ final class WinampMainView: NSView {
         updateClutterbar()
     }
 
-    func updateSeekPosition(_ newPos: Int) {
-        cachedSeekPosition = newPos
-        if let localSeek = localSeekPosition {
-            if abs(newPos - localSeek) <= 3 {
-                localSeekPosition = nil
-                currentSeekPosition = newPos
-                lastUpdateTime = Date()
-            }
-        } else {
-            currentSeekPosition = newPos
-            lastUpdateTime = Date()
-        }
-    }
-
     func updateAlwaysOnTop(_ onTop: Bool) {
         guard onTop != cachedAlwaysOnTop else { return }
         cachedAlwaysOnTop = onTop
@@ -966,11 +936,10 @@ final class WinampMainView: NSView {
         timeDisplayLayer.opacity = 1
     }
 
-    private func updateTimeDisplay() {
+    func updateTimeDisplay() {
         guard let sp = sprites else { return }
 
-        let seekPos = cachedState == .playing ? currentSeekPosition : (cachedSeekPosition)
-        let timeImage = renderTimeImage(seekPos, sprites: sp)
+        let timeImage = renderTimeImage(displaySeekPosition, sprites: sp)
         timeDisplayLayer.contents = timeImage
     }
 
@@ -1139,7 +1108,7 @@ final class WinampMainView: NSView {
         stereoLayer.contents = isStereo ? sp.stereoActive : sp.stereoInactive
     }
 
-    private func updatePositionThumb() {
+    func updatePositionThumb() {
         guard sprites != nil else { return }
         guard let length = cachedLength, length > 0 else {
             posThumbLayer.isHidden = true
@@ -1147,13 +1116,11 @@ final class WinampMainView: NSView {
         }
         posThumbLayer.isHidden = false
 
-        let seekPos = cachedState == .playing ? currentSeekPosition : cachedSeekPosition
-
         let progress: Double
         if isDraggingPos {
             progress = dragPosProgress
         } else if let pending = pendingSeekProgress {
-            let liveProgress = min(1.0, max(0.0, Double(seekPos) / Double(length)))
+            let liveProgress = min(1.0, max(0.0, Double(displaySeekPosition) / Double(length)))
             if abs(liveProgress - pending) > 0.01 {
                 pendingSeekProgress = nil
                 progress = liveProgress
@@ -1161,7 +1128,7 @@ final class WinampMainView: NSView {
                 progress = pending
             }
         } else {
-            progress = min(1.0, max(0.0, Double(seekPos) / Double(length)))
+            progress = min(1.0, max(0.0, Double(displaySeekPosition) / Double(length)))
         }
 
         let posR = WinampSkin.positionBarRegion
@@ -1254,21 +1221,8 @@ final class WinampMainView: NSView {
     }
 
     private func comboTick() {
-        // Interpolate seek position
-        if cachedState == .playing {
-            let elapsed = Date().timeIntervalSince(lastUpdateTime)
-            if let localBase = localSeekPosition {
-                currentSeekPosition = localBase + Int(elapsed)
-            } else {
-                let basePosition = cachedSeekPosition
-                currentSeekPosition = basePosition + Int(elapsed)
-            }
-        }
-
-        // Update time display
+        // Update time display and position thumb from PlaybackState
         updateTimeDisplay()
-
-        // Update position thumb
         updatePositionThumb()
 
         // Scroll title text
@@ -1506,9 +1460,6 @@ final class WinampMainView: NSView {
         pendingSeekProgress = dragPosProgress
         if let length = cachedLength, length > 0 {
             let newPosition = Int(dragPosProgress * Double(length))
-            currentSeekPosition = newPosition
-            localSeekPosition = newPosition
-            lastUpdateTime = Date()
             onSeek?(newPosition)
         }
         updatePositionThumb()
@@ -1516,8 +1467,7 @@ final class WinampMainView: NSView {
 
     private func currentPosProgress() -> Double {
         guard let length = cachedLength, length > 0 else { return 0 }
-        let seekPos = cachedState == .playing ? currentSeekPosition : cachedSeekPosition
-        return min(1.0, max(0.0, Double(seekPos) / Double(length)))
+        return min(1.0, max(0.0, Double(displaySeekPosition) / Double(length)))
     }
 
     // MARK: - Volume Drag

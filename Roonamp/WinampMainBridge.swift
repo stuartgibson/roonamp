@@ -27,11 +27,8 @@ struct WinampMainBridge: View {
     @State private var isWindowActive: Bool = true
     @State private var visualizerMode: VisualizerMode = .spectrum
 
-    // Position tracking (shared between normal and shade modes)
-    @State private var currentSeekPosition: Int = 0
-    @State private var lastUpdateTime: Date = Date()
-    @State private var positionTimer: Timer?
-    @State private var localSeekPosition: Int?
+    // Display seek position — thin state updated from PlaybackState
+    @State private var displaySeekPosition: Int = 0
 
     private var scale: CGFloat { CGFloat(windowScale) }
     private let windowWidth: CGFloat = 275
@@ -47,7 +44,7 @@ struct WinampMainBridge: View {
                 WinampWindowShadeView(
                     skin: skin,
                     isWindowActive: isWindowActive,
-                    currentSeekPosition: currentSeekPosition,
+                    currentSeekPosition: displaySeekPosition,
                     showRemaining: $showRemaining,
                     displayMode: $wsDisplayMode,
                     onOptions: { openSettings() },
@@ -58,9 +55,7 @@ struct WinampMainBridge: View {
                         guard let zone = roonAPI.currentZone,
                               let length = zone.nowPlaying?.length, length > 0 else { return }
                         let newPosition = Int(newProgress * Double(length))
-                        currentSeekPosition = newPosition
-                        localSeekPosition = newPosition
-                        lastUpdateTime = Date()
+                        playback.handleUserSeek(newPosition)
                         Task { await roonAPI.seek(zoneId: zone.id, seconds: newPosition) }
                     }
                 )
@@ -103,13 +98,7 @@ struct WinampMainBridge: View {
             if !roonAPI.isConnected {
                 roonAPI.connect()
             }
-            if playback.seekPosition > 0 {
-                currentSeekPosition = playback.seekPosition
-                lastUpdateTime = Date()
-            }
-            if playback.state == .playing {
-                startPositionTimer()
-            }
+            displaySeekPosition = playback.currentSeekPosition
             if roonAPI.isPlaylistVisible {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
                     openWindow(id: "playlist", value: true)
@@ -121,51 +110,9 @@ struct WinampMainBridge: View {
                 }
             }
         }
-        .onDisappear {
-            stopPositionTimer()
+        .onReceive(playback.currentSeekPositionSubject) { newPosition in
+            displaySeekPosition = newPosition
         }
-        .onReceive(playback.seekPositionPublisher) { newPosition in
-            if let localSeek = localSeekPosition {
-                if abs(newPosition - localSeek) <= 3 {
-                    localSeekPosition = nil
-                    currentSeekPosition = newPosition
-                    lastUpdateTime = Date()
-                }
-            } else {
-                currentSeekPosition = newPosition
-                lastUpdateTime = Date()
-            }
-        }
-        .onChange(of: playback.state) { oldValue, newValue in
-            if newValue == .playing {
-                lastUpdateTime = Date()
-                startPositionTimer()
-            } else {
-                stopPositionTimer()
-            }
-        }
-    }
-
-    // Position timer only used for windowshade mode — normal mode has its own comboTimer
-    private func startPositionTimer() {
-        guard isWindowShade else { return }
-        stopPositionTimer()
-        positionTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { _ in
-            if playback.state == .playing {
-                let elapsed = Date().timeIntervalSince(lastUpdateTime)
-                if let localBase = localSeekPosition {
-                    currentSeekPosition = localBase + Int(elapsed)
-                } else {
-                    let basePosition = playback.seekPosition
-                    currentSeekPosition = basePosition + Int(elapsed)
-                }
-            }
-        }
-    }
-
-    private func stopPositionTimer() {
-        positionTimer?.invalidate()
-        positionTimer = nil
     }
 }
 
@@ -298,6 +245,7 @@ struct WinampMainNSViewRepresentable: NSViewRepresentable {
         view.onEject = { /* no action */ }
         view.onSeek = { newPosition in
             guard let zoneId = roonAPI.currentZone?.id else { return }
+            roonAPI.playback.handleUserSeek(newPosition)
             Task { await roonAPI.seek(zoneId: zoneId, seconds: newPosition) }
         }
         view.onVolumeChange = { newProgress in
@@ -387,11 +335,12 @@ struct WinampMainNSViewRepresentable: NSViewRepresentable {
                 }
                 .store(in: &cancellables)
 
-            // Seek position (high-frequency, separate from zone changes)
-            roonAPI.playback.seekPositionPublisher
-                .receive(on: DispatchQueue.main)
+            // Seek position (interpolated by PlaybackState)
+            roonAPI.playback.currentSeekPositionSubject
                 .sink { [weak view] seekPos in
-                    view?.updateSeekPosition(seekPos)
+                    view?.displaySeekPosition = seekPos
+                    view?.updateTimeDisplay()
+                    view?.updatePositionThumb()
                 }
                 .store(in: &cancellables)
 
