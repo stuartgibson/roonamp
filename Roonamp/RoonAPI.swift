@@ -912,4 +912,5 @@ struct NowPlaying: Hashable {
 extension Notification.Name {
     static let alwaysOnTopChanged = Notification.Name("alwaysOnTopChanged")
     static let albumArtVisibilityChanged = Notification.Name("albumArtVisibilityChanged")
+    static let openSettingsRequested = Notification.Name("openSettingsRequested")
 }

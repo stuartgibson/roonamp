@@ -505,167 +505,6 @@ struct WinampTitleBarButton: View {
     }
 }
 
-// MARK: - Winamp Bitmap Text (used by windowshade)
-
-struct WinampBitmapText: View {
-    let text: String
-    let bitmap: NSImage
-    let region: WinampSkin.ButtonRegion
-    @Environment(\.winampScale) private var scale
-
-    @State private var scrollOffset: CGFloat = 0
-    @State private var scrollTimer: Timer?
-    @State private var scrollDirection: CGFloat = 1.0
-    @State private var cachedImage: NSImage?
-    @State private var cachedText: String = ""
-    @State private var cachedBitmap: NSImage?
-
-    var body: some View {
-        let renderedText = getCachedRenderedText()
-        Group {
-            if let renderedText {
-                let textWidth = renderedText.size.width
-                let regionWidth = CGFloat(region.width)
-                let needsScrolling = textWidth > regionWidth
-
-                ZStack(alignment: .leading) {
-                    Image(nsImage: renderedText)
-                        .resizable()
-                        .interpolation(.none)
-                        .frame(width: textWidth * scale, height: 6 * scale)
-                        .offset(x: needsScrolling ? -scrollOffset * scale : 0)
-                }
-                .frame(width: regionWidth * scale, height: 6 * scale, alignment: .leading)
-                .clipped()
-                .offset(x: CGFloat(region.x) * scale, y: CGFloat(region.y) * scale)
-                .onAppear {
-                    if needsScrolling {
-                        startScrolling(textWidth: textWidth, regionWidth: regionWidth)
-                    }
-                }
-                .onChange(of: text) {
-                    stopScrolling()
-                    if needsScrolling {
-                        startScrolling(textWidth: textWidth, regionWidth: regionWidth)
-                    }
-                }
-                .onDisappear {
-                    stopScrolling()
-                }
-            }
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-    }
-
-    private func getCachedRenderedText() -> NSImage? {
-        if text == cachedText && bitmap === cachedBitmap, let cached = cachedImage {
-            return cached
-        }
-        let rendered = renderBitmapText()
-        DispatchQueue.main.async {
-            cachedText = text
-            cachedBitmap = bitmap
-            cachedImage = rendered
-        }
-        return rendered
-    }
-
-    private func startScrolling(textWidth: CGFloat, regionWidth: CGFloat) {
-        scrollOffset = 0
-        scrollDirection = 1.0
-        let maxScroll = textWidth - regionWidth + 10
-
-        scrollTimer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { _ in
-            scrollOffset += scrollDirection * 0.5
-
-            if scrollOffset >= maxScroll {
-                scrollDirection = -1.0
-                scrollOffset = maxScroll
-            } else if scrollOffset <= 0 {
-                scrollDirection = 1.0
-                scrollOffset = 0
-            }
-        }
-    }
-
-    private func stopScrolling() {
-        scrollTimer?.invalidate()
-        scrollTimer = nil
-    }
-
-    private func renderBitmapText() -> NSImage? {
-        guard let cgImage = bitmap.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
-            return nil
-        }
-
-        let charWidth: CGFloat = 5
-        let charHeight: CGFloat = 6
-        let spacing: CGFloat = 1
-
-        let upperText = text.uppercased()
-        let totalWidth = CGFloat(upperText.count) * (charWidth + spacing)
-
-        let renderedImage = NSImage(size: NSSize(width: totalWidth, height: charHeight))
-
-        renderedImage.lockFocus()
-        NSGraphicsContext.current?.imageInterpolation = .none
-
-        var xOffset: CGFloat = 0
-
-        for char in upperText {
-            if let charImage = extractCharacter(char, from: cgImage, charWidth: charWidth, charHeight: charHeight) {
-                charImage.draw(at: NSPoint(x: xOffset, y: 0),
-                              from: NSRect(origin: .zero, size: charImage.size),
-                              operation: .copy,
-                              fraction: 1.0)
-            }
-            xOffset += charWidth + spacing
-        }
-
-        renderedImage.unlockFocus()
-
-        return renderedImage
-    }
-
-    private func extractCharacter(_ char: Character, from cgImage: CGImage, charWidth: CGFloat, charHeight: CGFloat) -> NSImage? {
-        let row0 = "ABCDEFGHIJKLMNOPQRSTUVWXYZ\"@   "
-        let row1 = "0123456789 .:()-\'!_+\\/[]^&%,=$#"
-        let row2 = "  ?*                            "
-
-        let charMaps = [row0, row1, row2]
-
-        // Handle space - return blank
-        if char == " " {
-            return NSImage(size: NSSize(width: charWidth, height: charHeight))
-        }
-
-        // Find character in the map
-        for (rowIndex, charMap) in charMaps.enumerated() {
-            if let index = charMap.firstIndex(of: char) {
-                let col = charMap.distance(from: charMap.startIndex, to: index)
-
-                let yPosition = CGFloat(rowIndex) * charHeight
-
-                let sourceRect = CGRect(
-                    x: CGFloat(col) * charWidth,
-                    y: yPosition,
-                    width: charWidth,
-                    height: charHeight
-                )
-
-                guard let croppedCGImage = cgImage.cropping(to: sourceRect) else {
-                    return nil
-                }
-
-                return NSImage(cgImage: croppedCGImage, size: NSSize(width: charWidth, height: charHeight))
-            }
-        }
-
-        // Unknown character - return blank
-        return NSImage(size: NSSize(width: charWidth, height: charHeight))
-    }
-}
-
 // MARK: - Winamp Info Display (used by windowshade for time)
 
 struct WinampInfoDisplay: View {
@@ -1146,6 +985,7 @@ struct WinampWindowShadeView: View {
     let onSeek: (Double) -> Void
     @EnvironmentObject var roonAPI: RoonAPI
     @EnvironmentObject var playback: PlaybackState
+    @EnvironmentObject var skinManager: WinampSkinManager
     @Environment(\.winampScale) private var scale
 
     enum WSDisplayMode: String, CaseIterable {
@@ -1248,13 +1088,14 @@ struct WinampWindowShadeView: View {
                 .allowsHitTesting(false)
             case .trackInfo:
                 if let nowPlaying = playback.nowPlaying,
-                   let textBitmap = skin.textBitmap {
-                    WinampBitmapText(
-                        text: "\(nowPlaying.artist) - \(nowPlaying.title)",
-                        bitmap: textBitmap,
+                   let sprites = skinManager.currentSpriteCache {
+                    WinampMarqueeText(
+                        text: nowPlaying.artist.isEmpty
+                            ? nowPlaying.title
+                            : "\(nowPlaying.artist) - \(nowPlaying.title)",
+                        sprites: sprites,
                         region: region
                     )
-                    .allowsHitTesting(false)
                 }
             case .off:
                 EmptyView()

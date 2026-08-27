@@ -73,6 +73,7 @@ struct RoonampApp: App {
     @AppStorage("windowScale") private var windowScale: Double = 2.0
     @AppStorage(MenuBarPrefs.enabledKey) private var menuBarEnabled: Bool = false
     @Environment(\.openWindow) private var openWindow
+    @Environment(\.openSettings) private var openSettings
 
     var body: some Scene {
         WindowGroup {
@@ -92,6 +93,11 @@ struct RoonampApp: App {
             .onAppear {
                 AppDelegate.sharedSkinManager = skinManager
                 MenuBarController.shared.configure(roonAPI: roonAPI)
+            }
+            // Menu bar extra's "Settings…" item — AppKit can't reach the
+            // Settings scene directly, so it posts and we open it from here.
+            .onReceive(NotificationCenter.default.publisher(for: .openSettingsRequested)) { _ in
+                openSettings()
             }
         }
         .windowStyle(.hiddenTitleBar)

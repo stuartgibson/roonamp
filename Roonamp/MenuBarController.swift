@@ -30,6 +30,9 @@ enum MenuBarPrefs {
     /// Separator between the enabled parts of the menu bar title.
     static let partSeparator = " \u{2013} "
 
+    /// Widest a now-playing row in the dropdown may draw, in points.
+    static let menuInfoMaxWidth: CGFloat = 280
+
     /// Reads a Bool that defaults to `fallback` when it has never been written.
     static func bool(_ key: String, default fallback: Bool) -> Bool {
         UserDefaults.standard.object(forKey: key) as? Bool ?? fallback
@@ -38,18 +41,23 @@ enum MenuBarPrefs {
 
 // MARK: - Scrolling text view
 
-/// Draws a music-note glyph plus the now-playing text, clipped to the view's
+/// Shows a music-note glyph plus the now-playing text, clipped to the view's
 /// width. When the text is wider than the available region it scrolls, looping
 /// with a gap and pausing briefly each time it returns to the start.
+///
+/// The text is pre-rendered into a layer and scrolled by CoreAnimation rather
+/// than redrawn per frame. A status item repaints through an offscreen
+/// `renderInContext:` pass over its whole view tree, so dirtying this view at a
+/// frame rate cost ~30% CPU no matter how cheap the drawing itself was. Nothing
+/// here marks the view as needing display during a scroll.
 final class MenuBarScrollingTextView: NSView {
 
     var text: String = "" {
         didSet {
             guard text != oldValue else { return }
             measureText()
-            resetScroll()
             updateWidth()
-            needsDisplay = true
+            rebuildContent()
         }
     }
 
@@ -57,9 +65,8 @@ final class MenuBarScrollingTextView: NSView {
     var maxWidth: CGFloat = CGFloat(MenuBarPrefs.defaultMaxWidth) {
         didSet {
             guard maxWidth != oldValue else { return }
-            resetScroll()
             updateWidth()
-            needsDisplay = true
+            rebuildContent()
         }
     }
 
@@ -71,7 +78,7 @@ final class MenuBarScrollingTextView: NSView {
     func refreshLayout() {
         measureText()
         updateWidth()
-        needsDisplay = true
+        rebuildContent()
     }
 
     // Layout metrics
@@ -85,15 +92,47 @@ final class MenuBarScrollingTextView: NSView {
     // Scroll animation
     private let scrollSpeed: CGFloat = 24       // points per second
     private let startPause: CFTimeInterval = 1.5
-    private var offset: CGFloat = 0
-    private var pauseUntil: CFTimeInterval = 0
-    private var lastTick: CFTimeInterval = 0
-    private var timer: Timer?
+    private static let scrollAnimationKey = "menuBarScroll"
 
     private var textWidth: CGFloat = 0
     private lazy var font: NSFont = .menuBarFont(ofSize: 13)
 
+    // Symbol lookup and text layout are expensive enough to be worth keeping
+    // across rebuilds; both depend only on the text and the appearance.
+    private var cachedIcon: CGImage?
+    private var cachedIconColor: NSColor?
+    private var cachedAttributed: NSAttributedString?
+    private var cachedAttributedText: String?
+    private var cachedTextHeight: CGFloat = 0
+
+    // Layers: the icon is static, the text scrolls inside a clipping layer.
+    private let iconLayer = CALayer()
+    private let textClipLayer = CALayer()
+    private let textLayer = CALayer()
+
+    /// Guards against reinstalling an identical animation on every layout pass,
+    /// which would restart the scroll from the beginning each time.
+    private var appliedContentKey: String?
+
     // MARK: Lifecycle
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        layer?.masksToBounds = true
+        for l in [iconLayer, textClipLayer, textLayer] {
+            l.actions = ["contents": NSNull(), "position": NSNull(),
+                         "bounds": NSNull(), "hidden": NSNull()]
+        }
+        iconLayer.contentsGravity = .resizeAspect
+        textClipLayer.masksToBounds = true
+        textLayer.contentsGravity = .resize
+        textClipLayer.addSublayer(textLayer)
+        layer?.addSublayer(iconLayer)
+        layer?.addSublayer(textClipLayer)
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     override var isFlipped: Bool { false }
 
@@ -103,20 +142,39 @@ final class MenuBarScrollingTextView: NSView {
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         if window == nil {
-            stopTimer()
+            stopScrolling()
         } else {
+            applyContentsScale()
             updateWidth()
-            startTimerIfNeeded()
+            rebuildContent()
         }
+    }
+
+    override func viewDidChangeBackingProperties() {
+        super.viewDidChangeBackingProperties()
+        applyContentsScale()
+        // The rendered image is resolution-dependent, so it has to be redone.
+        appliedContentKey = nil
+        rebuildContent()
     }
 
     override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
-        needsDisplay = true
+        // labelColor resolves differently under the new appearance, so both the
+        // tinted icon and the rendered text are stale.
+        cachedIcon = nil
+        cachedIconColor = nil
+        cachedAttributed = nil
+        cachedAttributedText = nil
+        appliedContentKey = nil
+        rebuildContent()
     }
 
-    deinit {
-        timer?.invalidate()
+    private func applyContentsScale() {
+        let s = window?.backingScaleFactor ?? 2
+        iconLayer.contentsScale = s
+        textLayer.contentsScale = s
+        layer?.contentsScale = s
     }
 
     // MARK: Measurement
@@ -151,100 +209,148 @@ final class MenuBarScrollingTextView: NSView {
 
     private func updateWidth() {
         onWidthChange?(ceil(desiredWidth))
-        startTimerIfNeeded()
     }
 
-    private func resetScroll() {
-        offset = 0
-        pauseUntil = CACurrentMediaTime() + startPause
-        lastTick = CACurrentMediaTime()
+    // MARK: Layout
+
+    override func layout() {
+        super.layout()
+        let iconY = ((bounds.height - iconSize) / 2).rounded()
+        iconLayer.frame = CGRect(x: leadingInset, y: iconY, width: iconSize, height: iconSize)
+
+        let originX = leadingInset + iconSize + iconGap
+        textClipLayer.frame = CGRect(x: originX, y: 0,
+                                     width: max(0, bounds.width - originX - trailingInset),
+                                     height: bounds.height)
+        // The clip width decides whether the text needs to scroll at all.
+        rebuildContent()
     }
+
+    // MARK: Content
+
+    /// Renders the icon and text into their layers and installs (or clears) the
+    /// scroll animation. Cheap to call repeatedly — it no-ops unless something
+    /// that affects the rendered output actually changed.
+    private func rebuildContent() {
+        let color = NSColor.labelColor
+        iconLayer.contents = icon(color: color)
+
+        let clipWidth = textClipLayer.bounds.width
+        let scrolling = isScrolling
+        let key = "\(text)|\(scrolling)|\(clipWidth)|\(textLayer.contentsScale)"
+        guard key != appliedContentKey else { return }
+        appliedContentKey = key
+
+        stopScrolling()
+
+        guard !text.isEmpty, let attributed = attributedText(color: color) else {
+            textLayer.contents = nil
+            return
+        }
+
+        // A scrolling marquee draws the string twice, a gap apart, so that when
+        // the first copy has travelled a full loop the second sits exactly where
+        // it started and the wrap is invisible.
+        let loopWidth = textWidth + loopGap
+        let imageWidth = scrolling ? loopWidth + textWidth : textWidth
+        let imageHeight = cachedTextHeight
+
+        textLayer.contents = renderText(attributed,
+                                        width: imageWidth,
+                                        height: imageHeight,
+                                        secondCopyAt: scrolling ? loopWidth : nil)
+        let y = ((textClipLayer.bounds.height - imageHeight) / 2).rounded()
+        textLayer.frame = CGRect(x: 0, y: y, width: imageWidth, height: imageHeight)
+
+        guard scrolling else { return }
+        startScrolling(loopWidth: loopWidth)
+    }
+
+    /// Composites the text (twice, when looping) into a single image so the
+    /// scroll is a layer move rather than a redraw.
+    private func renderText(_ attributed: NSAttributedString,
+                            width: CGFloat,
+                            height: CGFloat,
+                            secondCopyAt: CGFloat?) -> CGImage? {
+        let scale = textLayer.contentsScale
+        let pxW = max(1, Int((width * scale).rounded(.up)))
+        let pxH = max(1, Int((height * scale).rounded(.up)))
+        let bitmapInfo = CGImageAlphaInfo.premultipliedFirst.rawValue
+            | CGBitmapInfo.byteOrder32Little.rawValue
+        guard let ctx = CGContext(data: nil, width: pxW, height: pxH,
+                                  bitsPerComponent: 8, bytesPerRow: 0,
+                                  space: Self.colorSpace,
+                                  bitmapInfo: bitmapInfo) else { return nil }
+        ctx.scaleBy(x: scale, y: scale)
+
+        let graphics = NSGraphicsContext(cgContext: ctx, flipped: false)
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = graphics
+        // labelColor inside the attributed string was already resolved, but text
+        // rendering still reads the current appearance for things like smoothing.
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            attributed.draw(at: .zero)
+            if let secondCopyAt {
+                attributed.draw(at: CGPoint(x: secondCopyAt, y: 0))
+            }
+        }
+        NSGraphicsContext.restoreGraphicsState()
+        return ctx.makeImage()
+    }
+
+    private static let colorSpace = CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
 
     // MARK: Animation
 
-    private func startTimerIfNeeded() {
-        guard window != nil, isScrolling else {
-            stopTimer()
-            return
-        }
-        guard timer == nil else { return }
-        lastTick = CACurrentMediaTime()
-        let timer = Timer(timeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
-            self?.tick()
-        }
-        // .common so the ticker keeps moving while a menu is being tracked.
-        RunLoop.main.add(timer, forMode: .common)
-        self.timer = timer
+    /// One infinite keyframe animation: hold at the start for `startPause`, then
+    /// travel one loop width at `scrollSpeed`. CoreAnimation runs this on the
+    /// render server, so the app does no work per frame.
+    private func startScrolling(loopWidth: CGFloat) {
+        guard loopWidth > 0, scrollSpeed > 0 else { return }
+        let travel = CFTimeInterval(loopWidth / scrollSpeed)
+        let total = startPause + travel
+        let base = textLayer.position.x
+
+        let anim = CAKeyframeAnimation(keyPath: "position.x")
+        anim.values = [base, base, base - loopWidth]
+        anim.keyTimes = [0, NSNumber(value: startPause / total), 1]
+        anim.duration = total
+        anim.repeatCount = .infinity
+        anim.isRemovedOnCompletion = false
+        textLayer.add(anim, forKey: Self.scrollAnimationKey)
     }
 
-    private func stopTimer() {
-        timer?.invalidate()
-        timer = nil
+    private func stopScrolling() {
+        textLayer.removeAnimation(forKey: Self.scrollAnimationKey)
     }
 
-    private func tick() {
-        let now = CACurrentMediaTime()
-        let delta = min(now - lastTick, 0.2)
-        lastTick = now
-        guard now >= pauseUntil else { return }
+    // MARK: Cached pieces
 
-        offset += scrollSpeed * CGFloat(delta)
-        let loopWidth = textWidth + loopGap
-        if offset >= loopWidth {
-            // The second copy has arrived exactly at the start position, so
-            // snapping back to zero is seamless.
-            offset = 0
-            pauseUntil = now + startPause
-        }
-        needsDisplay = true
-    }
-
-    // MARK: Drawing
-
-    override func draw(_ dirtyRect: NSRect) {
-        effectiveAppearance.performAsCurrentDrawingAppearance {
-            drawContents()
-        }
-    }
-
-    private func drawContents() {
-        let color = NSColor.labelColor
-
-        if let icon = tintedIcon(color: color) {
-            let y = ((bounds.height - iconSize) / 2).rounded()
-            icon.draw(in: CGRect(x: leadingInset, y: y, width: iconSize, height: iconSize))
-        }
-
-        guard !text.isEmpty else { return }
-
-        let attributed = NSAttributedString(string: text, attributes: [
-            .font: font,
-            .foregroundColor: color
-        ])
-        let textHeight = ceil(attributed.size().height)
-        let y = ((bounds.height - textHeight) / 2).rounded()
-        let originX = leadingInset + iconSize + iconGap
-
-        let region = CGRect(x: originX, y: 0,
-                            width: max(0, bounds.width - originX - trailingInset),
-                            height: bounds.height)
-
-        NSGraphicsContext.saveGraphicsState()
-        NSBezierPath(rect: region).setClip()
-        attributed.draw(at: CGPoint(x: originX - offset, y: y))
-        if isScrolling {
-            attributed.draw(at: CGPoint(x: originX - offset + textWidth + loopGap, y: y))
-        }
-        NSGraphicsContext.restoreGraphicsState()
-    }
-
-    private func tintedIcon(color: NSColor) -> NSImage? {
+    private func icon(color: NSColor) -> CGImage? {
+        if let cachedIcon, cachedIconColor == color { return cachedIcon }
         guard let base = NSImage(systemSymbolName: "music.note", accessibilityDescription: "Roonamp") else {
             return nil
         }
         let config = NSImage.SymbolConfiguration(pointSize: 12, weight: .regular)
             .applying(NSImage.SymbolConfiguration(paletteColors: [color]))
-        return base.withSymbolConfiguration(config)
+        guard let tinted = base.withSymbolConfiguration(config) else { return nil }
+        var rect = CGRect(x: 0, y: 0, width: iconSize, height: iconSize)
+        let cg = tinted.cgImage(forProposedRect: &rect, context: nil, hints: nil)
+        cachedIcon = cg
+        cachedIconColor = color
+        return cg
+    }
+
+    private func attributedText(color: NSColor) -> NSAttributedString? {
+        if let cachedAttributed, cachedAttributedText == text { return cachedAttributed }
+        let attributed = NSAttributedString(string: text, attributes: [
+            .font: font,
+            .foregroundColor: color
+        ])
+        cachedAttributed = attributed
+        cachedAttributedText = text
+        cachedTextHeight = ceil(attributed.size().height)
+        return attributed
     }
 }
 
@@ -331,6 +437,10 @@ final class MenuBarController: NSObject, NSMenuDelegate {
 
         let menu = NSMenu()
         menu.delegate = self
+        // We set `isEnabled` on every item ourselves; automatic validation would
+        // override those flags (it enables anything whose target responds to the
+        // action, which re-enables Play/Prev/Next with no zone connected).
+        menu.autoenablesItems = false
         item.menu = menu
 
         statusItem = item
@@ -378,19 +488,19 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         menu.removeAllItems()
 
         if let np = playback?.nowPlaying {
-            menu.addItem(infoItem(np.title, font: .menuFont(ofSize: 13)))
+            menu.addItem(infoItem(np.title, copyable: true))
             if !np.artist.isEmpty {
-                menu.addItem(infoItem(np.artist, font: .menuFont(ofSize: 11)))
+                menu.addItem(infoItem(np.artist, copyable: true))
             }
             if !np.album.isEmpty {
-                menu.addItem(infoItem(np.album, font: .menuFont(ofSize: 11)))
+                menu.addItem(infoItem(np.album, copyable: true))
             }
         } else {
-            menu.addItem(infoItem("Nothing Playing", font: .menuFont(ofSize: 13)))
+            menu.addItem(infoItem("Nothing Playing"))
         }
 
         if let zone = playback?.displayName {
-            menu.addItem(infoItem(zone, font: .menuFont(ofSize: 11)))
+            menu.addItem(infoItem("Output: \(zone)"))
         }
 
         menu.addItem(.separator())
@@ -411,14 +521,66 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         add(to: menu, title: "Quit Roonamp", action: #selector(quit), enabled: true)
     }
 
-    private func infoItem(_ title: String, font: NSFont) -> NSMenuItem {
-        let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
-        item.attributedTitle = NSAttributedString(string: title, attributes: [
-            .font: font,
-            .foregroundColor: NSColor.labelColor
-        ])
-        item.isEnabled = false
+    /// A now-playing row. When `copyable`, clicking it puts the full untruncated
+    /// text on the pasteboard; otherwise the row is inert (zone name, placeholder).
+    private func infoItem(_ title: String, copyable: Bool = false) -> NSMenuItem {
+        let item = NSMenuItem(title: title,
+                              action: copyable ? #selector(copyInfo(_:)) : nil,
+                              keyEquivalent: "")
+        // `ofSize: 0` is the standard menu font size, matching the action items.
+        var attrs: [NSAttributedString.Key: Any] = [.font: NSFont.menuFont(ofSize: 0)]
+        // An explicit colour is what keeps an inert row from rendering in the
+        // washed-out disabled grey. Copyable rows omit it so AppKit can swap in
+        // white when the row is highlighted.
+        if !copyable { attrs[.foregroundColor] = NSColor.labelColor }
+
+        // Menu items size to fit their title, so an unbounded string (classical
+        // recordings can list half a dozen performers) drags every row in the
+        // dropdown out with it. Clip to a fixed width and keep the full text on
+        // the tooltip.
+        let shown = Self.truncate(title, attributes: attrs, maxWidth: MenuBarPrefs.menuInfoMaxWidth)
+        item.attributedTitle = NSAttributedString(string: shown, attributes: attrs)
+
+        if copyable {
+            item.target = self
+            item.representedObject = title
+            item.isEnabled = true
+            item.toolTip = "Copy \u{201C}\(title)\u{201D}"
+        } else {
+            item.isEnabled = false
+            if shown != title { item.toolTip = title }
+        }
         return item
+    }
+
+    /// Trims `text` until it fits `maxWidth`, appending an ellipsis. Measures the
+    /// rendered string rather than counting characters so proportional fonts and
+    /// wide scripts land in the right place.
+    private static func truncate(_ text: String,
+                                 attributes: [NSAttributedString.Key: Any],
+                                 maxWidth: CGFloat) -> String {
+        func width(_ s: String) -> CGFloat {
+            NSAttributedString(string: s, attributes: attributes).size().width
+        }
+        guard width(text) > maxWidth else { return text }
+
+        let chars = Array(text)
+        // Largest prefix whose text-plus-ellipsis still fits.
+        var low = 0, high = chars.count
+        while low < high {
+            let mid = (low + high + 1) / 2
+            if width(String(chars[0..<mid]) + "\u{2026}") <= maxWidth {
+                low = mid
+            } else {
+                high = mid - 1
+            }
+        }
+        let kept = String(chars[0..<low])
+            .trimmingCharacters(in: .whitespaces)
+            // A cut that lands right after a separator reads as a typo.
+            .trimmingCharacters(in: CharacterSet(charactersIn: ",;-/&"))
+            .trimmingCharacters(in: .whitespaces)
+        return kept + "\u{2026}"
     }
 
     private func add(to menu: NSMenu, title: String, action: Selector, enabled: Bool) {
@@ -445,6 +607,13 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         Task { await api.previous(zoneId: zoneId) }
     }
 
+    @objc private func copyInfo(_ sender: NSMenuItem) {
+        guard let text = sender.representedObject as? String, !text.isEmpty else { return }
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(text, forType: .string)
+    }
+
     @objc private func showMainWindow() {
         NSApp.activate(ignoringOtherApps: true)
         WinampWindow.current?.makeKeyAndOrderFront(nil)
@@ -452,7 +621,11 @@ final class MenuBarController: NSObject, NSMenuDelegate {
 
     @objc private func showSettings() {
         NSApp.activate(ignoringOtherApps: true)
-        NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
+        // Routed through the SwiftUI scene's `openSettings` action rather than
+        // `NSApp.sendAction(showSettingsWindow:)` — the selector lookup walks the
+        // responder chain and finds no target while the menu is still tracking
+        // (and immediately after `activate`, before a key window exists).
+        NotificationCenter.default.post(name: .openSettingsRequested, object: nil)
     }
 
     @objc private func quit() {

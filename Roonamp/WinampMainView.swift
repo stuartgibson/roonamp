@@ -338,6 +338,15 @@ final class WinampMainView: NSView {
     private var cachedIsSettingsVisible: Bool = false
     private var cachedIsWindowActive: Bool = true
 
+    /// Everything that changes what the time readout draws. Compared before
+    /// recompositing the digits.
+    private struct TimeDisplayKey: Equatable {
+        let seconds: Int
+        let showRemaining: Bool
+        let length: Int?
+    }
+    private var cachedTimeKey: TimeDisplayKey?
+
     // Timer state
     private var comboTimer: Timer?
     private var blinkTimer: Timer?
@@ -347,9 +356,6 @@ final class WinampMainView: NSView {
     var displaySeekPosition: Int = 0
 
     // Title scroll state
-    private var scrollOffset: CGFloat = 0
-    private var scrollDirection: CGFloat = 1.0
-    private var renderedTitleWidth: CGFloat = 0
 
     // Time display
     var showRemaining: Bool = false
@@ -597,6 +603,9 @@ final class WinampMainView: NSView {
     func rebuildAllLayers() {
         guard let sp = sprites else { return }
 
+        // New sprites mean the cached readout is stale even at the same time.
+        cachedTimeKey = nil
+
         CATransaction.begin()
         CATransaction.setDisableActions(true)
 
@@ -650,7 +659,6 @@ final class WinampMainView: NSView {
         let titleR = WinampSkin.titleRegion
         titleTextClipLayer.frame = CGRect(x: CGFloat(titleR.x), y: CGFloat(titleR.y),
                                            width: CGFloat(titleR.width), height: CGFloat(titleR.height))
-        titleTextLayer.frame = CGRect(x: 0, y: 0, width: CGFloat(titleR.width), height: 6)
 
         // Info displays
         let kbpsR = WinampSkin.kbpsRegion
@@ -804,8 +812,6 @@ final class WinampMainView: NSView {
             if cachedTitle != "No Connection" {
                 cachedTitle = "No Connection"
                 cachedArtist = ""
-                scrollOffset = 0
-                scrollDirection = 1.0
                 updateTitleText()
             }
             timeDisplayLayer.isHidden = false
@@ -840,8 +846,6 @@ final class WinampMainView: NSView {
         if newTitle != cachedTitle || newArtist != cachedArtist {
             cachedTitle = newTitle
             cachedArtist = newArtist
-            scrollOffset = 0
-            scrollDirection = 1.0
             updateTitleText()
         }
 
@@ -941,6 +945,15 @@ final class WinampMainView: NSView {
     func updateTimeDisplay() {
         guard let sp = sprites else { return }
 
+        // The tick runs at 2Hz but the display has one-second resolution, so
+        // half the ticks would recomposite the digits and dirty the layer for
+        // nothing.
+        let key = TimeDisplayKey(seconds: displaySeekPosition,
+                                 showRemaining: showRemaining,
+                                 length: cachedLength)
+        guard key != cachedTimeKey else { return }
+        cachedTimeKey = key
+
         let timeImage = renderTimeImage(displaySeekPosition, sprites: sp)
         timeDisplayLayer.contents = timeImage
     }
@@ -1001,44 +1014,11 @@ final class WinampMainView: NSView {
 
     private func updateTitleText() {
         guard let sp = sprites else { return }
-        guard !cachedTitle.isEmpty || !cachedArtist.isEmpty else {
-            titleTextLayer.contents = nil
-            renderedTitleWidth = 0
-            return
-        }
-
         let text = cachedArtist.isEmpty ? cachedTitle : "\(cachedArtist) - \(cachedTitle)"
-        let charWidth: CGFloat = 5
-        let charHeight: CGFloat = 6
-        let spacing: CGFloat = 1
-
-        let upperText = text.uppercased()
-        let totalWidth = CGFloat(upperText.count) * (charWidth + spacing)
-        renderedTitleWidth = totalWidth
-
-        let bitmapInfo = CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue)
-        guard let ctx = CGContext(data: nil, width: max(1, Int(totalWidth)), height: Int(charHeight),
-                                   bitsPerComponent: 8, bytesPerRow: max(1, Int(totalWidth)) * 4,
-                                   space: CGColorSpaceCreateDeviceRGB(),
-                                   bitmapInfo: bitmapInfo.rawValue) else { return }
-
-        ctx.clear(CGRect(x: 0, y: 0, width: totalWidth, height: charHeight))
-
-        var xOff: CGFloat = 0
-        for ch in upperText {
-            if let img = sp.textChars[ch] {
-                ctx.draw(img, in: CGRect(x: xOff, y: 0, width: charWidth, height: charHeight))
-            }
-            xOff += charWidth + spacing
-        }
-
-        titleTextLayer.contents = ctx.makeImage()
-        titleTextLayer.frame = CGRect(
-            x: -scrollOffset,
-            y: 0,
-            width: totalWidth,
-            height: charHeight
-        )
+        WinampMarquee.apply(text: text,
+                            sprites: sp,
+                            textLayer: titleTextLayer,
+                            regionWidth: CGFloat(WinampSkin.titleRegion.width))
     }
 
     func updateInfoDisplays() {
@@ -1227,22 +1207,6 @@ final class WinampMainView: NSView {
         updateTimeDisplay()
         updatePositionThumb()
 
-        // Scroll title text
-        let regionWidth = CGFloat(WinampSkin.titleRegion.width)
-        if renderedTitleWidth > regionWidth {
-            let step: CGFloat = 6.0
-            let rawMaxScroll = renderedTitleWidth - regionWidth + 10
-            let maxScroll = ceil(rawMaxScroll / step) * step
-            scrollOffset += scrollDirection * step
-            if scrollOffset >= maxScroll {
-                scrollDirection = -1.0
-                scrollOffset = maxScroll
-            } else if scrollOffset <= 0 {
-                scrollDirection = 1.0
-                scrollOffset = 0
-            }
-            titleTextLayer.frame.origin.x = -scrollOffset
-        }
     }
 
     // MARK: - Mouse Handling
