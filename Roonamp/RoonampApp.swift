@@ -71,6 +71,7 @@ struct RoonampApp: App {
 
     @State private var showAlbumArt = false
     @AppStorage("windowScale") private var windowScale: Double = 2.0
+    @AppStorage(MenuBarPrefs.enabledKey) private var menuBarEnabled: Bool = false
     @Environment(\.openWindow) private var openWindow
 
     var body: some Scene {
@@ -90,6 +91,7 @@ struct RoonampApp: App {
             }
             .onAppear {
                 AppDelegate.sharedSkinManager = skinManager
+                MenuBarController.shared.configure(roonAPI: roonAPI)
             }
         }
         .windowStyle(.hiddenTitleBar)
@@ -126,6 +128,8 @@ struct RoonampApp: App {
             CommandGroup(after: .toolbar) {
                 Toggle("Always on Top", isOn: $roonAPI.alwaysOnTop)
                     .keyboardShortcut("t", modifiers: .command)
+
+                Toggle("Show in Menu Bar", isOn: $menuBarEnabled)
 
                 Button("Cycle Size (1x / 1.5x / 2x)") {
                     switch windowScale {

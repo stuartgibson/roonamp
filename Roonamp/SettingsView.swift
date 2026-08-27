@@ -14,6 +14,11 @@ struct SettingsView: View {
     @AppStorage("windowScale") private var windowScale: Double = 2.0
     @AppStorage("displayKbps") private var displayKbps: String = ""
     @AppStorage("displayKHz") private var displayKHz: String = ""
+    @AppStorage(MenuBarPrefs.enabledKey) private var menuBarEnabled: Bool = false
+    @AppStorage(MenuBarPrefs.maxWidthKey) private var menuBarMaxWidth: Double = MenuBarPrefs.defaultMaxWidth
+    @AppStorage(MenuBarPrefs.showTrackKey) private var menuBarShowTrack: Bool = MenuBarPrefs.defaultShowTrack
+    @AppStorage(MenuBarPrefs.showArtistKey) private var menuBarShowArtist: Bool = MenuBarPrefs.defaultShowArtist
+    @AppStorage(MenuBarPrefs.showAlbumKey) private var menuBarShowAlbum: Bool = MenuBarPrefs.defaultShowAlbum
     @State private var showingSkinImporter = false
     @State private var importError: String?
     @State private var showingImportError = false
@@ -62,6 +67,38 @@ struct SettingsView: View {
                 }
             }
             
+            Section {
+                Toggle("Show in Menu Bar", isOn: $menuBarEnabled)
+
+                if menuBarEnabled {
+                    LabeledContent("Show") {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Toggle("Artist", isOn: $menuBarShowArtist)
+                            Toggle("Album", isOn: $menuBarShowAlbum)
+                            Toggle("Track", isOn: $menuBarShowTrack)
+                        }
+                    }
+
+                    HStack {
+                        Text("Maximum Width")
+                        Slider(
+                            value: $menuBarMaxWidth,
+                            in: MenuBarPrefs.minMaxWidth...MenuBarPrefs.maxMaxWidth,
+                            step: 10
+                        )
+                        Text("\(Int(menuBarMaxWidth)) pt")
+                            .monospacedDigit()
+                            .foregroundStyle(.secondary)
+                            .frame(width: 50, alignment: .trailing)
+                    }
+                }
+            } header: {
+                Text("Menu Bar")
+            } footer: {
+                Text("Shows the current track in the macOS menu bar, in the order Artist – Album – Track. Text wider than the maximum width scrolls horizontally. With all parts switched off only the icon is shown.")
+                    .foregroundStyle(.secondary)
+            }
+
             Section {
                 TextField("Bitrate (kbps)", text: $displayKbps)
                     .textFieldStyle(.roundedBorder)
