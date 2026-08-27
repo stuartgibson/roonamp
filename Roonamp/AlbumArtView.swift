@@ -143,6 +143,7 @@ struct AlbumArtView: View {
         .animation(.easeInOut(duration: 0.2), value: isHovering)
         .aspectRatio(1.0, contentMode: .fit)
         .clipShape(RoundedRectangle(cornerRadius: 12))
+        .winampWindowDrag(onClick: { showTrackInfo.toggle() })
         .background(AlbumArtWindowAccessor())
         .onAppear {
             // Force AsyncImage to reload when window appears
@@ -152,9 +153,6 @@ struct AlbumArtView: View {
             withAnimation(.easeInOut(duration: 0.2)) {
                 isHovering = hovering
             }
-        }
-        .onTapGesture {
-            showTrackInfo.toggle()
         }
     }
 }

@@ -97,6 +97,18 @@ struct SettingsView: View {
             }
             
             Section("Zone Selection") {
+                if roonAPI.isZoneUnavailable, let name = roonAPI.preferredZoneName {
+                    LabeledContent("Selected Zone") {
+                        HStack {
+                            Circle()
+                                .fill(Color.orange)
+                                .frame(width: 8, height: 8)
+                            Text("\(name) — No Connection")
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+
                 if !roonAPI.zones.isEmpty {
                     Picker("Active Zone", selection: Binding(
                         get: {
@@ -104,7 +116,7 @@ struct SettingsView: View {
                         },
                         set: { newZoneId in
                             if let selectedZone = roonAPI.zones.first(where: { $0.id == newZoneId }) {
-                                roonAPI.currentZone = selectedZone
+                                roonAPI.selectZone(selectedZone)
                             }
                         }
                     )) {

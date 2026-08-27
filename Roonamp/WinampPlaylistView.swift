@@ -137,11 +137,7 @@ struct WinampPlaylistView: View {
                     .resizable()
                     .interpolation(.none)
                     .frame(width: playlistSize.width * scale, height: CGFloat(WinampSkin.playlistTitleBarHeight) * scale)
-                    .overlay(
-                        DoubleClickOverlay {
-                            isPlaylistShade = true
-                        }
-                    )
+                    .winampWindowDrag(onDoubleClick: { isPlaylistShade = true })
 
                 // Shade button (left of close)
                 Button {
@@ -214,9 +210,7 @@ struct WinampPlaylistView: View {
                     .resizable()
                     .interpolation(.none)
                     .frame(width: totalW * scale, height: shadeH * scale)
-                    .onTapGesture(count: 2) {
-                        isPlaylistShade = false
-                    }
+                    .winampWindowDrag(onDoubleClick: { isPlaylistShade = false })
 
                 // Track title text (left side)
                 if let textBitmap = skin.textBitmap {
@@ -381,6 +375,7 @@ struct WinampPlaylistView: View {
             }
             .frame(width: CGFloat(WinampSkin.playlistLeftWidth) * scale, height: contentHeight * scale, alignment: .top)
             .clipped()
+            .winampWindowDrag()
             .padding(.top, CGFloat(WinampSkin.playlistTitleBarHeight) * scale)
         }
     }
@@ -403,6 +398,7 @@ struct WinampPlaylistView: View {
             }
             .frame(width: CGFloat(WinampSkin.playlistRightWidth) * scale, height: contentHeight * scale, alignment: .top)
             .clipped()
+            .winampWindowDrag()
             .padding(.leading, (playlistSize.width - CGFloat(WinampSkin.playlistRightWidth)) * scale)
             .padding(.top, CGFloat(WinampSkin.playlistTitleBarHeight) * scale)
         }
@@ -426,6 +422,7 @@ struct WinampPlaylistView: View {
                     .resizable()
                     .interpolation(.none)
                     .frame(width: playlistSize.width * scale, height: CGFloat(WinampSkin.playlistBottomHeight) * scale)
+                    .winampWindowDrag()
                     .padding(.top, (playlistSize.height - CGFloat(WinampSkin.playlistBottomHeight)) * scale)
             }
         }

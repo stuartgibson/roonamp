@@ -13,25 +13,32 @@ import Combine
 class RoonAPI: ObservableObject {
     @Published var isConnected = false
     @Published var zones: [RoonZone] = []
-    @Published var currentZone: RoonZone? {
+    @Published private(set) var currentZone: RoonZone? {
         didSet {
-            // Save the selected zone ID whenever it changes
-            if let zoneId = currentZone?.id {
-                UserDefaults.standard.set(zoneId, forKey: "lastSelectedZoneId")
-                print("💾 Saved last zone: \(currentZone?.displayName ?? "") (ID: \(zoneId))")
-            }
             // Clear history when switching to a different zone
             if oldValue?.id != currentZone?.id {
                 queueHistory = []
                 queueItems = []
-                // Restore saved queue if this is the initial zone load (oldValue was nil)
-                if oldValue == nil {
+                // Restore saved queue on the first zone load of this session
+                if oldValue == nil && !hasRestoredQueue {
+                    hasRestoredQueue = true
                     restoreQueueState()
                 }
             }
             syncPlayback()
         }
     }
+
+    /// The zone the user explicitly chose. Persisted, and only ever changed by
+    /// an explicit selection — never by the app falling back to another zone
+    /// when the chosen one goes offline.
+    @Published private(set) var preferredZoneId: String?
+    @Published private(set) var preferredZoneName: String?
+
+    /// True when there is no live zone to control — the chosen output is
+    /// offline, or we're not connected to the Core. The UI shows
+    /// "No Connection" in this state.
+    @Published private(set) var isZoneUnavailable = true
     let playback = PlaybackState()
     @Published var errorMessage: String?
     @Published var queueItems: [QueueItem] = []
@@ -64,10 +71,13 @@ class RoonAPI: ObservableObject {
     private var subscribedQueueZoneId: String?
     private var pairingSubscribers: [Int: Int] = [:] // requestId -> subKey
     private var pairedCoreId: String?
+    private var hasRestoredQueue = false
 
     init(appInfo: RoonAppInfo) {
         self.appInfo = appInfo
         // Restore preferences
+        self.preferredZoneId = UserDefaults.standard.string(forKey: "lastSelectedZoneId")
+        self.preferredZoneName = UserDefaults.standard.string(forKey: "lastSelectedZoneName")
         self.alwaysOnTop = UserDefaults.standard.bool(forKey: "alwaysOnTop")
         self.isPlaylistVisible = UserDefaults.standard.bool(forKey: "isPlaylistVisible")
         self.isAlbumArtVisible = UserDefaults.standard.bool(forKey: "isAlbumArtVisible")
@@ -108,6 +118,7 @@ class RoonAPI: ObservableObject {
         }
         moo = nil
         isConnected = false
+        clearZoneState()
     }
 
     private func startDiscovery() {
@@ -279,9 +290,15 @@ class RoonAPI: ObservableObject {
     }
 
     private func handleZoneChanged(_ data: [String: Any]) {
+        // Tracks whether the set of available zones changed, so the remembered
+        // selection can be re-applied (zone went away, or came back online).
+        var membershipChanged = false
+
         // Handle removed zones
         if let removed = data["zones_removed"] as? [String] {
+            let before = zones.count
             zones.removeAll { removed.contains($0.id) }
+            membershipChanged = zones.count != before
         }
 
         // Handle added zones
@@ -289,6 +306,7 @@ class RoonAPI: ObservableObject {
             for zoneData in added {
                 if let zone = parseZone(from: zoneData) {
                     zones.append(zone)
+                    membershipChanged = true
                 }
             }
         }
@@ -301,9 +319,14 @@ class RoonAPI: ObservableObject {
                         zones[idx] = zone
                     } else {
                         zones.append(zone)
+                        membershipChanged = true
                     }
                 }
             }
+        }
+
+        if membershipChanged {
+            applyZoneSelection()
         }
 
         // Handle seek changes (high frequency, only updates seek position)
@@ -423,6 +446,8 @@ class RoonAPI: ObservableObject {
         subscribedQueueZoneId = nil
         pairingSubscribers.removeAll()
         errorMessage = "Lost connection to Roon Core. Reconnecting..."
+        // Keep the remembered zone — it's re-applied once the Core is back.
+        clearZoneState()
 
         // Start reconnection after a short delay
         reconnectTask?.cancel()
@@ -436,28 +461,62 @@ class RoonAPI: ObservableObject {
     // MARK: - Zone Parsing
 
     private func updateZonesList(with newZones: [RoonZone]) {
-        let selectedZoneId = currentZone?.id
         zones = newZones
+        applyZoneSelection()
+    }
 
-        if let selectedZoneId = selectedZoneId {
-            if let updatedZone = zones.first(where: { $0.id == selectedZoneId }) {
-                currentZone = updatedZone
+    /// Explicit user selection. This is the choice that survives the zone going
+    /// offline, a Core reconnect, and app restarts.
+    func selectZone(_ zone: RoonZone) {
+        preferredZoneId = zone.id
+        preferredZoneName = zone.displayName
+        UserDefaults.standard.set(zone.id, forKey: "lastSelectedZoneId")
+        UserDefaults.standard.set(zone.displayName, forKey: "lastSelectedZoneName")
+        rlog("Selected zone: \(zone.displayName) (\(zone.id))")
+        applyZoneSelection()
+    }
+
+    /// Point `currentZone` at the preferred zone if it is available.
+    /// If the preferred zone is offline we deliberately leave no zone selected
+    /// rather than silently falling back to another one — the selection is kept
+    /// and re-applied as soon as the zone reappears.
+    private func applyZoneSelection() {
+        let hadNoZone = currentZone == nil
+
+        if let preferredZoneId = preferredZoneId {
+            if let zone = zones.first(where: { $0.id == preferredZoneId }) {
+                currentZone = zone
+                // Keep the remembered name fresh so it can be shown while offline
+                if preferredZoneName != zone.displayName {
+                    preferredZoneName = zone.displayName
+                    UserDefaults.standard.set(zone.displayName, forKey: "lastSelectedZoneName")
+                }
+                if hadNoZone {
+                    rlog("Zone '\(zone.displayName)' online — restored selection")
+                }
             } else {
-                restoreLastZone()
+                rlog("Zone '\(preferredZoneName ?? preferredZoneId)' unavailable — waiting for it to come back online")
+                currentZone = nil
             }
         } else {
-            restoreLastZone()
+            // No explicit choice yet: follow the first zone, but don't record it
+            // as a preference — the user hasn't picked one.
+            currentZone = zones.first
+        }
+
+        isZoneUnavailable = currentZone == nil
+
+        // Zone came back (or arrived for the first time) — refresh the queue.
+        if hadNoZone, currentZone != nil, isPlaylistVisible {
+            Task { await self.resubscribeQueue() }
         }
     }
 
-    private func restoreLastZone() {
-        if let lastZoneId = UserDefaults.standard.string(forKey: "lastSelectedZoneId") {
-            if let restoredZone = zones.first(where: { $0.id == lastZoneId }) {
-                currentZone = restoredZone
-                return
-            }
-        }
-        currentZone = zones.first
+    /// Drop all live zone state without touching the remembered selection.
+    private func clearZoneState() {
+        zones = []
+        currentZone = nil
+        isZoneUnavailable = true
     }
 
     private func parseZone(from data: [String: Any]) -> RoonZone? {

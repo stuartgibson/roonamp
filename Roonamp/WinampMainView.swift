@@ -799,8 +799,10 @@ final class WinampMainView: NSView {
             cachedState = nil
             cachedSeekPosition = 0
             displaySeekPosition = 0
-            if cachedTitle != "Nothing Playing" {
-                cachedTitle = "Nothing Playing"
+            // No zone means no live output to control — either the remembered
+            // zone is offline or we're not connected to the Core.
+            if cachedTitle != "No Connection" {
+                cachedTitle = "No Connection"
                 cachedArtist = ""
                 scrollOffset = 0
                 scrollDirection = 1.0

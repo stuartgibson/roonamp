@@ -1021,6 +1021,116 @@ struct WindowAccessorWinamp: NSViewRepresentable {
 }
 #endif
 
+// MARK: - Window Dragging
+
+#if os(macOS)
+/// macOS 27 no longer honours `isMovableByWindowBackground` for SwiftUI-hosted
+/// borderless windows (an Apple-confirmed AppKit regression first seen in the
+/// 26.3 RC), so the playlist, windowshade and album art windows move themselves.
+///
+/// Why it looks like this:
+///
+/// * **It has to be a SwiftUI gesture.** SwiftUI gives gestures on child views
+///   priority over an ancestor's, so buttons, the position bar and the visualizer
+///   keep working. An `NSViewRepresentable` doing the same job sits above SwiftUI
+///   content in AppKit hit testing regardless of ZStack order, and swallows the
+///   clicks meant for the controls drawn over it.
+///
+/// * **`minimumDistance` must be 0.** `WindowDragGesture`, and any `DragGesture`
+///   with a threshold, makes the window sit still for the first few pixels and
+///   then trail the pointer by that gap for the rest of the drag.
+///
+/// * **Two ways to move it.** `performDrag(with:)` is the good one — AppKit tracks
+///   the pointer itself, so the window keeps an exact grip from the first pixel —
+///   but it only works from the mouse-*down* event. Which event the first gesture
+///   update carries depends on the window: the playlist's first update is already
+///   a `leftMouseDragged` (its accessor installs a full-window `NSView`, so SwiftUI
+///   starts the gesture late) and `performDrag` with a drag event silently does
+///   nothing. So that case falls back to following the pointer in screen
+///   coordinates, anchored where the drag was first seen — no dead zone, at the
+///   cost of a few pixels of grip on a very fast flick.
+///
+/// `setFrameOrigin` keeps `windowWillMove` / `windowDidMove` firing, which the
+/// snapping logic depends on, and child windows (a snapped playlist) follow their
+/// parent either way. A press that never moves the window is reported as
+/// `onClick` and a double-click as `onDoubleClick` — the tap gestures they replace
+/// would otherwise never see the event.
+struct WindowBackgroundDrag: ViewModifier {
+    var onClick: (() -> Void)?
+    var onDoubleClick: (() -> Void)?
+
+    /// Pointer and window origin when the drag was first seen, in screen coordinates.
+    @State private var anchor: (mouse: NSPoint, origin: NSPoint)?
+    @State private var didMove = false
+    @State private var finished = false
+
+    func body(content: Content) -> some View {
+        content.gesture(
+            DragGesture(minimumDistance: 0)
+                .onChanged { _ in
+                    guard !finished,
+                          let event = NSApp.currentEvent,
+                          let window = event.window,
+                          window.isMovable else { return }
+
+                    switch event.type {
+                    case .leftMouseDown:
+                        if event.clickCount == 2, let onDoubleClick {
+                            finished = true
+                            onDoubleClick()
+                            return
+                        }
+                        // AppKit takes the drag from here and returns on mouse-up.
+                        let origin = window.frame.origin
+                        window.performDrag(with: event)
+                        finished = true
+                        if window.frame.origin == origin { onClick?() }
+
+                    case .leftMouseDragged:
+                        guard let anchor else {
+                            self.anchor = (NSEvent.mouseLocation, window.frame.origin)
+                            return
+                        }
+                        if follow(window, from: anchor) { didMove = true }
+
+                    default:
+                        return
+                    }
+                }
+                .onEnded { _ in
+                    // Gesture updates lag a fast flick; land on the pointer's final
+                    // position so the window doesn't stop short of it.
+                    if didMove, let anchor, let window = NSApp.currentEvent?.window {
+                        _ = follow(window, from: anchor)
+                    }
+                    if !finished && !didMove { onClick?() }
+                    anchor = nil
+                    didMove = false
+                    finished = false
+                }
+        )
+    }
+
+    /// Moves `window` so the pointer keeps the same grip on it. Returns whether it moved.
+    private func follow(_ window: NSWindow, from anchor: (mouse: NSPoint, origin: NSPoint)) -> Bool {
+        let mouse = NSEvent.mouseLocation
+        let target = NSPoint(x: anchor.origin.x + (mouse.x - anchor.mouse.x),
+                             y: anchor.origin.y + (mouse.y - anchor.mouse.y))
+        guard target != window.frame.origin else { return false }
+        window.setFrameOrigin(target)
+        return true
+    }
+}
+
+extension View {
+    /// Drag anywhere on this view to move its window.
+    func winampWindowDrag(onClick: (() -> Void)? = nil,
+                          onDoubleClick: (() -> Void)? = nil) -> some View {
+        modifier(WindowBackgroundDrag(onClick: onClick, onDoubleClick: onDoubleClick))
+    }
+}
+#endif
+
 // MARK: - Winamp Windowshade View
 
 struct WinampWindowShadeView: View {
@@ -1054,9 +1164,6 @@ struct WinampWindowShadeView: View {
                     .resizable()
                     .interpolation(.none)
                     .frame(width: wsWidth * scale, height: wsHeight * scale)
-                    .onTapGesture(count: 2) {
-                        onUnshade()
-                    }
             }
 
             // First dark rectangle: visualizer, track info, or off — single tap target
@@ -1117,6 +1224,7 @@ struct WinampWindowShadeView: View {
             }
         }
         .frame(width: wsWidth * scale, height: wsHeight * scale)
+        .winampWindowDrag(onDoubleClick: { onUnshade() })
     }
 
     @ViewBuilder
