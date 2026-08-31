@@ -30,6 +30,9 @@ enum MenuBarPrefs {
     /// Separator between the enabled parts of the menu bar title.
     static let partSeparator = " \u{2013} "
 
+    /// Shown in both the menu bar and the dropdown when there is no track.
+    static let nothingPlaying = "Nothing Playing"
+
     /// Widest a now-playing row in the dropdown may draw, in points.
     static let menuInfoMaxWidth: CGFloat = 280
 
@@ -70,6 +73,35 @@ final class MenuBarScrollingTextView: NSView {
         }
     }
 
+    /// Which glyph leads the status item. Driven by whether there is any
+    /// playback information at all, then by the transport state.
+    enum Glyph {
+        case playing, paused, stopped
+    }
+
+    var glyph: Glyph = .stopped {
+        didSet {
+            guard glyph != oldValue else { return }
+            iconLayer.contents = icon(color: NSColor.labelColor)
+        }
+    }
+
+    private var symbolName: String {
+        switch glyph {
+        case .playing: return "music.note"
+        case .paused:  return "pause.fill"
+        case .stopped: return "stop.fill"
+        }
+    }
+
+    private var symbolDescription: String {
+        switch glyph {
+        case .playing: return "Playing"
+        case .paused:  return "Paused"
+        case .stopped: return "Stopped"
+        }
+    }
+
     /// Called whenever the desired status item width changes.
     var onWidthChange: ((CGFloat) -> Void)?
 
@@ -101,6 +133,7 @@ final class MenuBarScrollingTextView: NSView {
     // across rebuilds; both depend only on the text and the appearance.
     private var cachedIcon: CGImage?
     private var cachedIconColor: NSColor?
+    private var cachedIconSymbol: String?
     private var cachedAttributed: NSAttributedString?
     private var cachedAttributedText: String?
     private var cachedTextHeight: CGFloat = 0
@@ -164,6 +197,7 @@ final class MenuBarScrollingTextView: NSView {
         // tinted icon and the rendered text are stale.
         cachedIcon = nil
         cachedIconColor = nil
+        cachedIconSymbol = nil
         cachedAttributed = nil
         cachedAttributedText = nil
         appliedContentKey = nil
@@ -327,8 +361,11 @@ final class MenuBarScrollingTextView: NSView {
     // MARK: Cached pieces
 
     private func icon(color: NSColor) -> CGImage? {
-        if let cachedIcon, cachedIconColor == color { return cachedIcon }
-        guard let base = NSImage(systemSymbolName: "music.note", accessibilityDescription: "Roonamp") else {
+        if let cachedIcon, cachedIconColor == color, cachedIconSymbol == symbolName {
+            return cachedIcon
+        }
+        guard let base = NSImage(systemSymbolName: symbolName,
+                                 accessibilityDescription: symbolDescription) else {
             return nil
         }
         let config = NSImage.SymbolConfiguration(pointSize: 12, weight: .regular)
@@ -338,6 +375,7 @@ final class MenuBarScrollingTextView: NSView {
         let cg = tinted.cgImage(forProposedRect: &rect, context: nil, hints: nil)
         cachedIcon = cg
         cachedIconColor = color
+        cachedIconSymbol = symbolName
         return cg
     }
 
@@ -461,9 +499,11 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     private func refreshText() {
         guard statusItem != nil else { return }
         guard let np = playback?.nowPlaying else {
-            textView.text = ""
+            textView.glyph = .stopped
+            textView.text = MenuBarPrefs.nothingPlaying
             return
         }
+        textView.glyph = playback?.state == .paused ? .paused : .playing
         var parts: [String] = []
         if MenuBarPrefs.bool(MenuBarPrefs.showArtistKey, default: MenuBarPrefs.defaultShowArtist) {
             parts.append(np.artist)
@@ -496,7 +536,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
                 menu.addItem(infoItem(np.album, copyable: true))
             }
         } else {
-            menu.addItem(infoItem("Nothing Playing"))
+            menu.addItem(infoItem(MenuBarPrefs.nothingPlaying))
         }
 
         if let zone = playback?.displayName {
